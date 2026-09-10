@@ -2820,6 +2820,20 @@ button.nrlcmp-chat-input-model-select {
   height: 100%;
 }
 
+/* Declarative-settings entry point (getSettingDefinitions(), Obsidian
+   1.13+): the React tree mounts inside a single Setting row's settingEl
+   instead of containerEl directly (see src/settings/SettingTab.tsx). The
+   nc-root absolute overlay still anchors to .vertical-tab-content above
+   (that lookup uses .closest(), unaffected by the extra nesting), this
+   reset just strips the row's own default chrome (border/padding/name
+   column) so nothing of Obsidian's normal row styling peeks out from
+   behind the full-bleed overlay. */
+.setting-item.nc-full-settings-row {
+  padding: 0;
+  border: none;
+  display: block;
+}
+
 /* Quick-slot pill buttons — hover state requires a CSS pseudo-class */
 .nc-quickslot {
   display: inline-flex;
