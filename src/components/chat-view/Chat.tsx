@@ -456,10 +456,17 @@ const Chat = forwardRef<ChatRef, ChatProps>((props, ref) => {
   // submitChatMutation.isPending pasa a true y showContinueResponseButton
   // vuelve a false hasta el siguiente tool call.
   useEffect(() => {
-    if (showContinueResponseButton && settings.chatOptions.autoContinueAfterToolCalls) {
+    if (
+      showContinueResponseButton &&
+      settings.chatOptions.autoContinueAfterToolCalls
+    ) {
       handleContinueResponse()
     }
-  }, [showContinueResponseButton, settings.chatOptions.autoContinueAfterToolCalls, handleContinueResponse])
+  }, [
+    showContinueResponseButton,
+    settings.chatOptions.autoContinueAfterToolCalls,
+    handleContinueResponse,
+  ])
 
   useEffect(() => {
     setFocusedMessageId(inputMessage.id)
