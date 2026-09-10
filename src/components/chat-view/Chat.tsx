@@ -447,6 +447,20 @@ const Chat = forwardRef<ChatRef, ChatProps>((props, ref) => {
     })
   }, [submitChatMutation, chatMessages, currentConversationId])
 
+  // Auto-continúa en vez de esperar el clic en "Continue Response" (pedido
+  // del usuario, 2026-09-09): mismas condiciones exactas de
+  // showContinueResponseButton, solo que además de mostrar el botón dispara
+  // handleContinueResponse() sola. Detrás de un ajuste (chatOptions.
+  // autoContinueAfterToolCalls, default true) para poder revertir a manual
+  // sin tocar código. No hay riesgo de loop: al llamar a mutate(),
+  // submitChatMutation.isPending pasa a true y showContinueResponseButton
+  // vuelve a false hasta el siguiente tool call.
+  useEffect(() => {
+    if (showContinueResponseButton && settings.chatOptions.autoContinueAfterToolCalls) {
+      handleContinueResponse()
+    }
+  }, [showContinueResponseButton, settings.chatOptions.autoContinueAfterToolCalls, handleContinueResponse])
+
   useEffect(() => {
     setFocusedMessageId(inputMessage.id)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- focus the initial input message only on mount

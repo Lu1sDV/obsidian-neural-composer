@@ -43,6 +43,7 @@ describe('parseNeuralComposerSettings', () => {
         includeCurrentFileContent: true,
         enableTools: true,
         maxAutoIterations: 1,
+        autoContinueAfterToolCalls: true,
       },
 
       enableAutoStartServer: false,

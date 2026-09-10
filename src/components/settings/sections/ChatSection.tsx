@@ -117,6 +117,24 @@ export function ChatSection() {
       </ObsidianSetting>
 
       <ObsidianSetting
+        name="Auto-continue after tool calls"
+        desc="Automatically resume the response once a tool call finishes, instead of waiting for a manual click on 'Continue Response'."
+      >
+        <ObsidianToggle
+          value={settings.chatOptions.autoContinueAfterToolCalls}
+          onChange={(value) => {
+            void setSettings({
+              ...settings,
+              chatOptions: {
+                ...settings.chatOptions,
+                autoContinueAfterToolCalls: value,
+              },
+            })
+          }}
+        />
+      </ObsidianSetting>
+
+      <ObsidianSetting
         name="Max auto tool requests"
         desc="Maximum number of consecutive tool calls that can be made automatically without user confirmation. Higher values can significantly increase costs as each tool call consumes additional tokens."
       >

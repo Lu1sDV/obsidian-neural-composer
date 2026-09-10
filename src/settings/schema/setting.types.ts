@@ -73,11 +73,18 @@ export const NeuralComposerSettingsSchema = z.object({
       includeCurrentFileContent: z.boolean(),
       enableTools: z.boolean(),
       maxAutoIterations: z.number(),
+      // .catch() propio (no solo el del objeto completo, ver los demás
+      // campos de arriba): así una instalación existente sin este campo
+      // todavía no pierde includeCurrentFileContent/enableTools/
+      // maxAutoIterations ya guardados, el .catch() de todo el objeto de
+      // abajo solo entra si TODO el bloque falla, no campo por campo.
+      autoContinueAfterToolCalls: z.boolean().catch(true),
     })
     .catch({
       includeCurrentFileContent: true,
       enableTools: true,
       maxAutoIterations: 1,
+      autoContinueAfterToolCalls: true,
     }),
 
   // --- NEURAL COMPOSER (CORE) ---
@@ -167,6 +174,7 @@ export const DEFAULT_SETTINGS: NeuralComposerSettings = {
     includeCurrentFileContent: true,
     enableTools: true,
     maxAutoIterations: 1,
+    autoContinueAfterToolCalls: true,
   },
 
   // --- NEURAL DEFAULTS ---
