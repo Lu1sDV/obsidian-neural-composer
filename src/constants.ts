@@ -19,6 +19,24 @@ export const RECOMMENDED_MODELS_FOR_EMBEDDING = [
 ]
 
 export const PROVIDER_TYPES_INFO = {
+  'codex-cli': {
+    label: 'Codex CLI (desktop)',
+    defaultProviderId: null,
+    requireApiKey: false,
+    requireBaseUrl: false,
+    supportEmbedding: false,
+    additionalSettings: [
+      {
+        label: 'Codex executable',
+        key: 'executablePath',
+        type: 'text',
+        placeholder: 'codex',
+        required: false,
+        description:
+          'Optional executable path (not a shell command). Uses your existing Codex login. Desktop only; text chat and apply, without images, tools, embeddings, or LightRAG.',
+      },
+    ],
+  },
   openai: {
     label: 'OpenAI',
     defaultProviderId: 'openai',

@@ -5,6 +5,7 @@ import { LLMProvider } from '../../types/provider.types'
 import { AnthropicProvider } from './anthropic'
 import { AzureOpenAIProvider } from './azureOpenaiProvider'
 import { BaseLLMProvider } from './base'
+import { CodexCliProvider } from './codexCliProvider'
 import { DeepSeekStudioProvider } from './deepseekStudioProvider'
 import { LLMModelNotFoundException } from './exception'
 import { GeminiProvider } from './gemini'
@@ -37,6 +38,9 @@ export function getProviderClient({
   }
 
   switch (provider.type) {
+    case 'codex-cli': {
+      return new CodexCliProvider(provider)
+    }
     case 'openai': {
       return new OpenAIAuthenticatedProvider(provider)
     }

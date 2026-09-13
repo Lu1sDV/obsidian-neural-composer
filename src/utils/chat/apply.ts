@@ -144,19 +144,22 @@ export const applyChangesToFile = async ({
     stream: false,
 
     // prediction is only available for OpenAI
-    prediction: {
-      type: 'content',
-      content: [
-        {
-          type: 'text',
-          text: currentFileContent,
-        },
-        {
-          type: 'text',
-          text: blockToApply,
-        },
-      ],
-    },
+    prediction:
+      model.providerType === 'codex-cli'
+        ? undefined
+        : {
+            type: 'content',
+            content: [
+              {
+                type: 'text',
+                text: currentFileContent,
+              },
+              {
+                type: 'text',
+                text: blockToApply,
+              },
+            ],
+          },
   })
 
   const responseContent = response.choices[0].message.content

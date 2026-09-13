@@ -250,9 +250,13 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
         )
         .addDropdown((dropdown) => {
           settings.chatModels.forEach((model) => {
+            if (model.providerType === 'codex-cli') return
             dropdown.addOption(model.id, `${model.providerId} - ${model.model}`)
           })
-          dropdown.addOption('', 'Same as chat model (default)')
+          dropdown.addOption(
+            '',
+            'Same as chat model (Codex CLI is not supported)',
+          )
           dropdown.setValue(settings.lightRagModelId || '')
           dropdown.onChange((value) => {
             void (async () => {

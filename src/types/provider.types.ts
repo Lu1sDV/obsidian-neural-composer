@@ -16,6 +16,15 @@ export const baseLlmProviderSchema = z.object({
  */
 export const llmProviderSchema = z.discriminatedUnion('type', [
   z.object({
+    type: z.literal('codex-cli'),
+    ...baseLlmProviderSchema.shape,
+    additionalSettings: z
+      .object({
+        executablePath: z.string().optional(),
+      })
+      .optional(),
+  }),
+  z.object({
     type: z.literal('openai'),
     ...baseLlmProviderSchema.shape,
   }),

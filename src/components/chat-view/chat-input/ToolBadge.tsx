@@ -17,6 +17,9 @@ export default function ToolBadge() {
 
   const [mcpManager, setMcpManager] = useState<McpManager | null>(null)
   const [toolCount, setToolCount] = useState(0)
+  const supportsTools =
+    settings.chatModels.find((model) => model.id === settings.chatModelId)
+      ?.providerType !== 'codex-cli'
 
   const handleBadgeClick = useCallback(() => {
     new McpSectionModal(app, plugin).open()
@@ -38,6 +41,7 @@ export default function ToolBadge() {
   )
 
   useEffect(() => {
+    if (!supportsTools) return
     const initMCPManager = async () => {
       const mcpManager = await getMcpManager()
       setMcpManager(mcpManager)
@@ -47,7 +51,7 @@ export default function ToolBadge() {
     }
     // Fix: Handle floating promise in useEffect
     void initMCPManager()
-  }, [getMcpManager])
+  }, [getMcpManager, supportsTools])
 
   useEffect(() => {
     if (mcpManager) {
@@ -65,6 +69,14 @@ export default function ToolBadge() {
       }
     }
   }, [mcpManager])
+
+  if (!supportsTools) {
+    return (
+      <div className="nrlcmp-chat-user-input-file-badge">
+        <span>Tools unavailable (Codex CLI)</span>
+      </div>
+    )
+  }
 
   return (
     <div

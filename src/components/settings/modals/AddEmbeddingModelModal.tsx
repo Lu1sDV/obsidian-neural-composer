@@ -1,7 +1,10 @@
 import { App, Notice } from 'obsidian'
 import { useState } from 'react'
 
-import { DEFAULT_PROVIDERS, PROVIDER_TYPES_INFO } from '../../../constants'
+import {
+  DEFAULT_EMBEDDING_MODELS,
+  PROVIDER_TYPES_INFO,
+} from '../../../constants'
 import { getProviderClient } from '../../../core/llm/manager'
 import { supportedDimensionsForIndex } from '../../../database/schema'
 import NeuralComposerPlugin from '../../../main'
@@ -39,8 +42,8 @@ function AddEmbeddingModelModalComponent({
   onClose,
 }: AddEmbeddingModelModalComponentProps) {
   const [formData, setFormData] = useState<Omit<EmbeddingModel, 'dimension'>>({
-    providerId: DEFAULT_PROVIDERS[0].id,
-    providerType: DEFAULT_PROVIDERS[0].type,
+    providerId: DEFAULT_EMBEDDING_MODELS[0].providerId,
+    providerType: DEFAULT_EMBEDDING_MODELS[0].providerType,
     id: '',
     model: '',
   })
@@ -151,8 +154,8 @@ function AddEmbeddingModelModalComponent({
             const provider = plugin.settings.providers.find(
               (p) => p.id === value,
             )
-            if (!provider) {
-              new Notice(`Provider with ID ${value} not found`)
+            if (!provider || provider.type === 'codex-cli') {
+              new Notice('Select a provider that supports embeddings')
               return
             }
             setFormData((prev) => ({

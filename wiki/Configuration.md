@@ -27,10 +27,13 @@ This tab manages which AI providers the plugin can use and stores your API crede
 | Ollama      | Local | Fully offline; no API key required               |
 | LM Studio   | Local | Local model runner with an OpenAI-compatible API |
 | Morph       | Cloud | Code-focused model for the Apply step            |
+| Codex CLI   | Desktop CLI | Existing Codex login; text chat/apply only; remote inference |
 
 For each cloud provider, paste the API key into the corresponding field. Keys are stored only in Obsidian's local `data.json` and are never sent anywhere except the provider's own API endpoint.
 
 For Ollama and LM Studio, enter the base URL of their local API server (defaults: `http://localhost:11434` and `http://localhost:1234`). No API key is needed.
+
+For Codex CLI, run `codex login`, click **Enable Codex** in its provider row, and then **Test connection**. A successful login and short test response automatically add the discovered models to Models and the Chat/Apply selectors; choose your preferred model in Chat settings. The gear lets you configure an executable path if needed. No API key or base URL is required. See the [Codex CLI provider guide](Providers-Guide#codex-cli-desktop) for details.
 
 ---
 

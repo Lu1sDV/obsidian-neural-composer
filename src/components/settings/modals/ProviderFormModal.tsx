@@ -157,33 +157,42 @@ function ProviderFormComponent({
         </>
       )}
 
-      <ObsidianSetting
-        name="API key" // Sentence case
-        desc="(leave blank if not required)"
-        required={providerTypeInfo.requireApiKey}
-      >
-        <ObsidianTextInput
-          value={formData.apiKey ?? ''}
-          placeholder="Enter your API Key"
-          onChange={(value: string) =>
-            setFormData((prev) => ({ ...prev, apiKey: value }))
-          }
+      {formData.type === 'codex-cli' ? (
+        <ObsidianSetting
+          name="Local Codex login"
+          desc="Install Codex CLI and run codex login in a terminal first. No API key or server URL is used. Responses arrive as completed CLI message chunks, not token-by-token."
         />
-      </ObsidianSetting>
+      ) : (
+        <>
+          <ObsidianSetting
+            name="API key" // Sentence case
+            desc="(leave blank if not required)"
+            required={providerTypeInfo.requireApiKey}
+          >
+            <ObsidianTextInput
+              value={formData.apiKey ?? ''}
+              placeholder="Enter your API Key"
+              onChange={(value: string) =>
+                setFormData((prev) => ({ ...prev, apiKey: value }))
+              }
+            />
+          </ObsidianSetting>
 
-      <ObsidianSetting
-        name="Base URL"
-        desc="(leave blank if using default)"
-        required={providerTypeInfo.requireBaseUrl}
-      >
-        <ObsidianTextInput
-          value={formData.baseUrl ?? ''}
-          placeholder="Enter base URL"
-          onChange={(value: string) =>
-            setFormData((prev) => ({ ...prev, baseUrl: value }))
-          }
-        />
-      </ObsidianSetting>
+          <ObsidianSetting
+            name="Base URL"
+            desc="(leave blank if using default)"
+            required={providerTypeInfo.requireBaseUrl}
+          >
+            <ObsidianTextInput
+              value={formData.baseUrl ?? ''}
+              placeholder="Enter base URL"
+              onChange={(value: string) =>
+                setFormData((prev) => ({ ...prev, baseUrl: value }))
+              }
+            />
+          </ObsidianSetting>
+        </>
+      )}
 
       {providerTypeInfo.additionalSettings.map((setting) => (
         <ObsidianSetting

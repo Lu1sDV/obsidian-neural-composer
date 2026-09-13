@@ -145,6 +145,32 @@ export default tseslint.config(
             'LightRAG',
             'Neural Composer',
             'NeuralComposer',
+            'Codex CLI',
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // This desktop-only CLI boundary uses erased Node types and a guarded
+    // runtime loader. Its subprocess tests run in Jest's Node environment.
+    files: [
+      'src/core/llm/codexCliProvider.ts',
+      'src/core/llm/codexCliProvider.test.ts',
+    ],
+    rules: {
+      'import/no-nodejs-modules': [
+        'error',
+        {
+          allow: [
+            'child_process',
+            'events',
+            'fs',
+            'fs/promises',
+            'os',
+            'path',
+            'readline',
+            'stream',
           ],
         },
       ],
