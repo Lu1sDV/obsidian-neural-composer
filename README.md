@@ -91,7 +91,7 @@ Open **Settings → Neural Composer**. The panel has a sidebar with seven tabs:
 
 A green dot in the status bar confirms the server is running. Right-click any folder in your vault to ingest notes and start chatting.
 
-Model discovery runs after saving credentials and when opening a model picker with a missing or expired catalog (24 hours). There is no background polling. Select a discovered model or enter its name manually; discovery never changes your configured models. Z.ai uses the general API endpoint, not the Coding Plan endpoint.
+Model discovery runs after saving credentials and when opening a model picker with a missing or expired catalog (24 hours). There is no background polling. Newly discovered models are added to the Models list with provider-qualified IDs; existing and removed models are never changed or deleted automatically. Manual model entry remains available. Z.ai uses the general API endpoint, not the Coding Plan endpoint.
 
 An authenticated model-list request returning HTTP 404 disables discovery for that provider endpoint, including after restart or key changes. **Refresh** respects this saved state. Use **Reset model discovery** or change the endpoint to try again. Authentication and temporary network failures do not mark an endpoint unsupported.
 
@@ -167,7 +167,7 @@ Neural Composer is designed with privacy as a core principle.
 
 ### Unreleased
 - Add Z.ai as a default provider while preserving existing provider settings.
-- Discover provider models with searchable suggestions, a 24-hour cache, manual entry, and persistent suppression after authenticated HTTP 404 responses.
+- Discover and automatically add provider models with provider-qualified IDs, a 24-hour cache, manual entry, and persistent suppression after authenticated HTTP 404 responses.
 
 ### v1.4.0 — 2026-05-27
 - **Mobile support (iOS / Android)** — plugin loads on Obsidian mobile and chats against a remote LightRAG server over HTTP. `lightRagUseRemote` is forced on, local-server management settings are hidden, and the bundle ships an `events` polyfill plus a `require` shim so node-only deps don't abort module evaluation on a non-Electron webview.
