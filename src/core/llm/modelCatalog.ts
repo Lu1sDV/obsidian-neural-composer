@@ -68,7 +68,10 @@ type CatalogProvider = {
   baseUrl?: string
   modelDiscovery?: ModelDiscovery
 }
-type CatalogSettings = { providers: CatalogProvider[] }
+type CatalogSettings = {
+  providers: CatalogProvider[]
+  chatModels?: unknown[]
+}
 type CatalogHost = {
   settings: CatalogSettings
   setSettings(settings: CatalogSettings): Promise<void>
@@ -90,6 +93,57 @@ type Entry = {
   initializationError?: string
   loading: boolean
   task?: Promise<void>
+}
+
+type ConfiguredChatModel = {
+  id: string
+  providerId: string
+  model: string
+}
+
+function isConfiguredChatModel(value: unknown): value is ConfiguredChatModel {
+  if (typeof value !== 'object' || value === null) return false
+  const model = value as Partial<ConfiguredChatModel>
+  return (
+    typeof model.id === 'string' &&
+    typeof model.providerId === 'string' &&
+    typeof model.model === 'string'
+  )
+}
+
+function addDiscoveredChatModels(
+  configured: unknown[] | undefined,
+  provider: CatalogProvider,
+  discovered: CatalogModel[],
+): unknown[] | undefined {
+  if (!configured) return configured
+  let result = configured
+  const ids = new Set(
+    configured.filter(isConfiguredChatModel).map((model) => model.id),
+  )
+  const models = new Set(
+    configured
+      .filter(isConfiguredChatModel)
+      .filter((model) => model.providerId === provider.id)
+      .map((model) => model.model),
+  )
+  for (const model of discovered) {
+    if (models.has(model.id)) continue
+    const baseId = `${provider.id}/${model.id}`
+    let id = baseId
+    for (let suffix = 2; ids.has(id); suffix++) id = `${baseId}-${suffix}`
+    if (result === configured) result = [...configured]
+    result.push({
+      id,
+      providerId: provider.id,
+      providerType: provider.type,
+      model: model.id,
+      enable: true,
+    })
+    ids.add(id)
+    models.add(model.id)
+  }
+  return result
 }
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -565,8 +619,10 @@ export class ModelCatalog {
         saved.status === 'ready' &&
         saved.updatedAt !== undefined &&
         Date.now() - saved.updatedAt < CACHE_TTL
-      )
+      ) {
+        await this.persist(entry, saved)
         return
+      }
     }
     entry.loading = true
     this.emit()
@@ -633,13 +689,24 @@ export class ModelCatalog {
     if (!this.current(entry)) return
     // Read at commit time; an in-flight listing must not overwrite other saved settings or manual models.
     const settings = this.plugin.settings
+    const provider = settings.providers.find(
+      (candidate) => candidate.id === entry.id,
+    )
+    if (!provider) return
+    const chatModels =
+      state?.status === 'ready'
+        ? addDiscoveredChatModels(settings.chatModels, provider, state.models)
+        : settings.chatModels
+    if (provider.modelDiscovery === state && chatModels === settings.chatModels)
+      return
     await this.plugin.setSettings({
       ...settings,
-      providers: settings.providers.map((provider) =>
-        provider.id === entry.id
-          ? { ...provider, modelDiscovery: state }
-          : provider,
+      providers: settings.providers.map((candidate) =>
+        candidate.id === entry.id
+          ? { ...candidate, modelDiscovery: state }
+          : candidate,
       ),
+      chatModels,
     })
   }
 

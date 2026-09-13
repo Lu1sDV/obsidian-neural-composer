@@ -20,7 +20,7 @@ type Provider = {
 
 type Settings = {
   providers: Provider[]
-  chatModels: string[]
+  chatModels: unknown[]
   other: string
 }
 
@@ -84,15 +84,13 @@ async function changeProvider(plugin: TestHost, changes: Partial<Provider>) {
   })
 }
 
-async function untilRequested(count = 1) {
-  for (
-    let attempt = 0;
-    attempt < 100 && fetchModels.mock.calls.length < count;
-    attempt++
-  ) {
-    await new Promise<void>((resolve) => setImmediate(resolve))
-  }
-  expect(fetchModels.mock.calls.length).toBeGreaterThanOrEqual(count)
+function pendingFetch(response: Promise<Response>) {
+  const started = deferred<void>()
+  fetchModels.mockImplementationOnce(() => {
+    started.resolve()
+    return response
+  })
+  return started.promise
 }
 
 describe('ModelCatalog', () => {
@@ -130,6 +128,84 @@ describe('ModelCatalog', () => {
     jest.restoreAllMocks()
   })
 
+  test('successful discovery adds every new model to the configured model list', async () => {
+    const plugin = host([
+      {
+        id: 'zai',
+        type: 'openai-compatible',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        apiKey: 'key',
+      },
+    ])
+    plugin.settings.chatModels = [
+      {
+        id: 'existing',
+        providerId: 'zai',
+        providerType: 'openai-compatible',
+        model: 'glm-existing',
+      },
+      {
+        id: 'zai/glm-new',
+        providerId: 'other',
+        providerType: 'openai',
+        model: 'different',
+      },
+    ]
+    fetchModels.mockResolvedValue(listed('glm-existing', 'glm-new', 'glm-next'))
+
+    await catalog(plugin).refresh('zai')
+
+    expect(plugin.settings.chatModels).toEqual([
+      {
+        id: 'existing',
+        providerId: 'zai',
+        providerType: 'openai-compatible',
+        model: 'glm-existing',
+      },
+      {
+        id: 'zai/glm-new',
+        providerId: 'other',
+        providerType: 'openai',
+        model: 'different',
+      },
+      {
+        id: 'zai/glm-new-2',
+        providerId: 'zai',
+        providerType: 'openai-compatible',
+        model: 'glm-new',
+        enable: true,
+      },
+      {
+        id: 'zai/glm-next',
+        providerId: 'zai',
+        providerType: 'openai-compatible',
+        model: 'glm-next',
+        enable: true,
+      },
+    ])
+  })
+
+  test('fresh persisted catalogs populate missing configured models without another request', async () => {
+    const plugin = host()
+    fetchModels.mockResolvedValue(listed('cached-model'))
+    const first = catalog(plugin)
+    await first.refresh('custom')
+    plugin.settings.chatModels = []
+    first.dispose()
+
+    await catalog(plugin).refresh('custom')
+
+    expect(fetchModels).toHaveBeenCalledTimes(1)
+    expect(plugin.settings.chatModels).toEqual([
+      {
+        id: 'custom/cached-model',
+        providerId: 'custom',
+        providerType: 'openai-compatible',
+        model: 'cached-model',
+        enable: true,
+      },
+    ])
+  })
   test('authenticated 404 remains unsupported through restart, expiry, force refresh, and changed keys', async () => {
     const plugin = host()
     const first = catalog(plugin)
@@ -241,10 +317,10 @@ describe('ModelCatalog', () => {
     const plugin = host()
     const service = catalog(plugin)
     const pending = deferred<Response>()
-    fetchModels.mockReturnValue(pending.promise)
+    const started = pendingFetch(pending.promise)
     const first = service.refresh('custom')
     const second = service.refresh('custom', true)
-    await untilRequested()
+    await started
     expect(service.get('custom').status).toBe('loading')
     await plugin.setSettings({
       ...plugin.settings,
@@ -255,7 +331,16 @@ describe('ModelCatalog', () => {
     await Promise.all([first, second])
     expect(fetchModels).toHaveBeenCalledTimes(1)
     expect(plugin.settings).toMatchObject({
-      chatModels: ['newly-configured'],
+      chatModels: [
+        'newly-configured',
+        {
+          id: 'custom/discovered',
+          providerId: 'custom',
+          providerType: 'openai-compatible',
+          model: 'discovered',
+          enable: true,
+        },
+      ],
       other: 'edited',
     })
   })
@@ -264,11 +349,10 @@ describe('ModelCatalog', () => {
     const plugin = host()
     const service = catalog(plugin)
     const old = deferred<Response>()
-    fetchModels
-      .mockReturnValueOnce(old.promise)
-      .mockResolvedValueOnce(listed('new-key-model'))
+    const started = pendingFetch(old.promise)
+    fetchModels.mockResolvedValueOnce(listed('new-key-model'))
     const first = service.refresh('custom')
-    await untilRequested()
+    await started
     await changeProvider(plugin, { apiKey: 'secret-two' })
     await service.refresh('custom')
     old.resolve(response({}, 404))
@@ -286,9 +370,9 @@ describe('ModelCatalog', () => {
     const pending = deferred<Response>()
     const notify = jest.fn()
     service.subscribe(notify)
-    fetchModels.mockReturnValue(pending.promise)
+    const started = pendingFetch(pending.promise)
     const work = service.refresh('custom')
-    await untilRequested()
+    await started
     await plugin.setSettings({ ...plugin.settings, providers: [] })
     service.dispose()
     notify.mockClear()
@@ -591,13 +675,11 @@ describe('ModelCatalog', () => {
     const plugin = host()
     const service = catalog(plugin)
     const pending = deferred<Response>()
-    fetchModels
-      .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(listed('after-reset'))
+    const started = pendingFetch(pending.promise)
+    fetchModels.mockResolvedValueOnce(listed('after-reset'))
     const work = service.refresh('custom')
-    await untilRequested()
+    await started
     const reset = service.reset('custom')
-    await new Promise<void>((resolve) => setImmediate(resolve))
     expect(fetchModels).toHaveBeenCalledTimes(1)
     pending.resolve(response({}, 404))
     await Promise.all([work, reset])
@@ -612,17 +694,16 @@ describe('ModelCatalog', () => {
     const plugin = host()
     const service = catalog(plugin)
     const first = deferred<Response>()
+    const started = pendingFetch(first.promise)
     fetchModels
-      .mockReturnValueOnce(first.promise)
       .mockResolvedValueOnce(listed('key-b'))
       .mockResolvedValueOnce(listed('fresh-key-a'))
     const work = service.refresh('custom')
-    await untilRequested()
+    await started
     await changeProvider(plugin, { apiKey: 'key-b' })
     await service.refresh('custom')
     await changeProvider(plugin, { apiKey: 'secret-one' })
     const returned = service.refresh('custom')
-    await new Promise<void>((resolve) => setImmediate(resolve))
     expect(fetchModels).toHaveBeenCalledTimes(2)
     first.resolve(listed('outdated-key-a'))
     await Promise.all([work, returned])
@@ -659,7 +740,23 @@ describe('ModelCatalog', () => {
       ),
     ).toEqual([[{ id: 'model-one' }], [{ id: 'model-two' }]])
     expect(plugin.settings.other).toBe('saved-during-discovery')
-    expect(plugin.settings.chatModels).toEqual(['configured-model'])
+    expect(plugin.settings.chatModels).toEqual([
+      'configured-model',
+      {
+        id: 'two/model-two',
+        providerId: 'two',
+        providerType: 'openai',
+        model: 'model-two',
+        enable: true,
+      },
+      {
+        id: 'one/model-one',
+        providerId: 'one',
+        providerType: 'openai',
+        model: 'model-one',
+        enable: true,
+      },
+    ])
   })
 
   test('server errors and invalid JSON stay retryable without replacing the saved catalog', async () => {
