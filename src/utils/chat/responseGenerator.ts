@@ -49,7 +49,8 @@ export class ResponseGenerator {
     this.providerClient = params.providerClient
     this.model = params.model
     this.conversationId = params.conversationId
-    this.enableTools = params.enableTools
+    this.enableTools =
+      params.enableTools && params.model.providerType !== 'codex-cli'
     this.maxAutoIterations = Math.max(1, params.maxAutoIterations) // Ensure maxAutoIterations is at least 1
     this.receivedMessages = params.messages
     this.promptGenerator = params.promptGenerator

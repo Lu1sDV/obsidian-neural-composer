@@ -44,6 +44,49 @@ type ModelSettingsRegistry = {
  * The SettingsComponent is the component that will be displayed when the model settings are opened.
  */
 const MODEL_SETTINGS_REGISTRY: ModelSettingsRegistry[] = [
+  {
+    check: (model) => model.providerType === 'codex-cli',
+    SettingsComponent: ({ model, plugin, onClose }: SettingsComponentProps) => {
+      const [modelName, setModelName] = useState(model.model)
+      const handleSubmit = async () => {
+        const validation = chatModelSchema.safeParse({
+          ...model,
+          model: modelName.trim(),
+        })
+        if (!validation.success) {
+          new Notice(validation.error.issues.map((v) => v.message).join('\n'))
+          return
+        }
+        await plugin.setSettings({
+          ...plugin.settings,
+          chatModels: plugin.settings.chatModels.map((entry) =>
+            entry.id === model.id ? validation.data : entry,
+          ),
+        })
+        onClose()
+      }
+
+      return (
+        <>
+          <ObsidianSetting
+            name="Model name"
+            desc="A model available to your Codex login. Desktop text chat and apply only; no images, tools, embeddings, or LightRAG."
+            required
+          >
+            <ObsidianTextInput value={modelName} onChange={setModelName} />
+          </ObsidianSetting>
+          <ObsidianSetting>
+            <ObsidianButton
+              text="Save"
+              onClick={() => void handleSubmit()}
+              cta
+            />
+            <ObsidianButton text="Cancel" onClick={onClose} />
+          </ObsidianSetting>
+        </>
+      )
+    },
+  },
   /**
    * OpenAI model settings
    */

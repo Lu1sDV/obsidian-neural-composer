@@ -129,7 +129,11 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
                     new EditProviderModal(app, plugin, provider).open()
                   }}
                 >
-                  {provider.apiKey ? '••••••••' : 'Set API key'}
+                  {provider.type === 'codex-cli'
+                    ? 'Local CLI login'
+                    : provider.apiKey
+                      ? '••••••••'
+                      : 'Set API key'}
                 </td>
                 <td>
                   <div className="nrlcmp-settings-actions">

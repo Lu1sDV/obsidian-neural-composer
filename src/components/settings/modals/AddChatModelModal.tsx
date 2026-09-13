@@ -112,6 +112,13 @@ function AddChatModelModalComponent({
         />
       </ObsidianSetting>
 
+      {formData.providerType === 'codex-cli' && (
+        <ObsidianSetting
+          name="Text-only Codex model"
+          desc="Enter a model available to your Codex login. Supports desktop chat and apply only; images, MCP tools, embeddings, and LightRAG are unavailable."
+        />
+      )}
+
       <ObsidianSetting name="Model name" required>
         {' '}
         {/* Sentence case */}

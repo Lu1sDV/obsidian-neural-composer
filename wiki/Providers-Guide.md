@@ -8,6 +8,23 @@ Each provider needs two things: a configuration entry in **Settings → Provider
 
 ---
 
+## Codex CLI (desktop)
+
+Use your existing [Codex CLI](https://developers.openai.com/codex/cli/) login for text chat and apply without adding an API key to Obsidian. The CLI runs locally but sends prompts to OpenAI; this is not an offline model.
+
+1. Install Codex CLI and run `codex login` in a terminal under the same operating-system account as Obsidian.
+2. Open **Settings → Neural Composer → Providers → Add custom provider**, choose **Codex CLI (desktop)**, and give it an ID.
+3. Leave **Codex executable** blank if Obsidian can find `codex` on its PATH; otherwise enter the full executable path. This field is a path, not a shell command. Windows requires the native `codex.exe`, not a `.cmd` launcher.
+4. Under **Models → Add custom model**, select that provider and enter a model available to your Codex login. Select the new model for **Chat** and/or **Apply**.
+
+Responses arrive as completed CLI message chunks, not token-by-token. Conversation roles and history are supplied as an ordered text transcript. Images, MCP/tool calls and tool-result history, embeddings, and the LightRAG backend are not supported. Start a new text-only chat when switching from a tool-using conversation, and choose a separate graph logic model and embedding provider instead of inheriting the Codex chat model.
+
+Each request runs in a temporary empty directory with a read-only sandbox and a tool-free model catalogue. User/project configuration, instructions, hooks, and integrations are excluded while the existing CLI authentication is retained. Stopping a response terminates its CLI process and removes the temporary directory.
+
+**Compatibility:** verified with `codex-cli 0.154.0`. Older versions must support `exec --json`, `--ignore-user-config`, `--ignore-rules`, `--strict-config`, and the tool-isolation configuration; upgrade if the CLI rejects an option. If authentication fails, run `codex login` again using the configured executable.
+
+---
+
 ## OpenAI
 
 **Get an API key:** [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
