@@ -10,6 +10,7 @@ import { ObsidianDropdown } from '../../common/ObsidianDropdown'
 import { ObsidianSetting } from '../../common/ObsidianSetting'
 import { ObsidianTextInput } from '../../common/ObsidianTextInput'
 import { ReactModal } from '../../common/ReactModal'
+import { ModelDiscovery } from '../ModelDiscovery'
 
 type AddChatModelModalComponentProps = {
   plugin: NeuralComposerPlugin
@@ -119,17 +120,12 @@ function AddChatModelModalComponent({
         />
       )}
 
-      <ObsidianSetting name="Model name" required>
-        {' '}
-        {/* Sentence case */}
-        <ObsidianTextInput
-          value={formData.model}
-          placeholder="Enter the model name"
-          onChange={(value: string) =>
-            setFormData((prev) => ({ ...prev, model: value }))
-          }
-        />
-      </ObsidianSetting>
+      <ModelDiscovery
+        plugin={plugin}
+        providerId={formData.providerId}
+        model={formData.model}
+        onModelChange={(model) => setFormData((prev) => ({ ...prev, model }))}
+      />
 
       <ObsidianSetting
         name="Prompt level" // Sentence case

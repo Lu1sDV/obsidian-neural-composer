@@ -1,77 +1,92 @@
-import {
-  DEFAULT_APPLY_MODEL_ID,
-  DEFAULT_CHAT_MODELS,
-  DEFAULT_CHAT_MODEL_ID,
-  DEFAULT_EMBEDDING_MODELS,
-  DEFAULT_PROVIDERS,
-} from '../../constants'
+import { getProviderInfo } from '../../constants'
 
-import { SETTINGS_SCHEMA_VERSION } from './migrations'
+import { DEFAULT_SETTINGS } from './setting.types'
 import { parseNeuralComposerSettings } from './settings'
 
 describe('parseNeuralComposerSettings', () => {
-  it('should return default values for empty input', () => {
-    const result = parseNeuralComposerSettings({})
-    expect(result).toEqual({
-      version: SETTINGS_SCHEMA_VERSION,
+  it('offers the Z.ai preset for fresh installs and migrated settings', () => {
+    const preset = {
+      id: 'zai',
+      type: 'openai-compatible' as const,
+      baseUrl: 'https://api.z.ai/api/paas/v4',
+    }
 
-      providers: [...DEFAULT_PROVIDERS],
-
-      chatModels: [...DEFAULT_CHAT_MODELS],
-      embeddingModels: [...DEFAULT_EMBEDDING_MODELS],
-
-      chatModelId: DEFAULT_CHAT_MODEL_ID,
-      applyModelId: DEFAULT_APPLY_MODEL_ID,
-      embeddingModelId: 'openai/text-embedding-3-small',
-
-      systemPrompt: '',
-
-      ragOptions: {
-        chunkSize: 1000,
-        thresholdTokens: 8192,
-        minSimilarity: 0.0,
-        limit: 10,
-        excludePatterns: [],
-        includePatterns: [],
-      },
-
-      mcp: {
-        servers: [],
-      },
-
-      chatOptions: {
-        includeCurrentFileContent: true,
-        enableTools: true,
-        maxAutoIterations: 1,
-        autoContinueAfterToolCalls: true,
-      },
-
-      enableAutoStartServer: false,
-      graphViewMode: '2d',
-      lightRagApiKey: '',
-      lightRagChunkOverlap: 100,
-      lightRagChunkSize: 1200,
-      lightRagCommand: 'lightrag-server',
-      lightRagCustomEnv: '',
-      lightRagEntityTypes: '',
-      lightRagMaxAsync: 4,
-      lightRagMaxParallelInsert: 1,
-      lightRagOntologyFolder: '',
-      lightRagQueryMode: 'mix',
-      lightRagRerankApiKey: '',
-      lightRagRerankBinding: '',
-      lightRagRerankBindingType: '',
-      lightRagRerankHost: '',
-      lightRagRerankModel: '',
-      lightRagServerUrl: 'http://localhost:9621',
-      lightRagShowCitations: true,
-      lightRagSummaryLanguage: 'English',
-      lightRagSyncFolder: '',
-      lightRagExcludePatterns: [],
-      lightRagExcludeHiddenFiles: true,
-      lightRagUseRemote: false,
-      lightRagWorkDir: '',
-      useCustomEntityTypes: false,
+    expect(DEFAULT_SETTINGS.providers).toContainEqual(preset)
+    expect(parseNeuralComposerSettings({}).providers).toContainEqual(preset)
+    expect(
+      parseNeuralComposerSettings({ version: 14, providers: [] }).providers,
+    ).toEqual([preset])
+    expect(getProviderInfo(preset)).toMatchObject({
+      requireApiKey: true,
+      supportEmbedding: false,
     })
+  })
+
+  it('loads existing providers without discovery metadata or preset requirements', () => {
+    const provider = {
+      id: 'custom',
+      type: 'openai-compatible' as const,
+      baseUrl: 'http://localhost:8080/v1',
+      apiKey: 'saved-key',
+    }
+    const settings = parseNeuralComposerSettings({
+      version: 15,
+      providers: [provider],
+    })
+
+    expect(settings.providers).toEqual([provider])
+    expect(getProviderInfo(settings.providers[0])).toMatchObject({
+      requireApiKey: false,
+      supportEmbedding: true,
+    })
+  })
+
+  it('preserves a customized zai provider, model selection and cache through migration and reload', () => {
+    const provider = {
+      id: 'zai',
+      type: 'openai-compatible',
+      baseUrl: 'https://custom.example/v1',
+      apiKey: 'existing-key',
+      modelDiscovery: {
+        version: 1,
+        endpoint: 'https://custom.example/v1',
+        protocol: 'openai',
+        credentialHash: 'a'.repeat(64),
+        models: [{ id: 'custom-model', name: 'Custom model' }],
+        status: 'unsupported',
+        updatedAt: 100,
+      },
+    }
+    const model = {
+      id: 'my-model',
+      providerType: 'openai-compatible',
+      providerId: 'zai',
+      model: 'custom-model',
+    }
+    const migrated = parseNeuralComposerSettings({
+      version: 14,
+      providers: [provider],
+      chatModels: [model],
+      chatModelId: model.id,
+      applyModelId: model.id,
+    })
+    const reloaded = parseNeuralComposerSettings(
+      JSON.parse(JSON.stringify(migrated)),
+    )
+
+    expect(reloaded.providers).toEqual([provider])
+    expect(reloaded.chatModels).toEqual([model])
+    expect(reloaded.chatModelId).toBe(model.id)
+    expect(reloaded.applyModelId).toBe(model.id)
+  })
+
+  it('does not discard credentials when optional discovery metadata is invalid', () => {
+    const provider = { id: 'custom', type: 'openai', apiKey: 'saved-key' }
+    const settings = parseNeuralComposerSettings({
+      version: 15,
+      providers: [{ ...provider, modelDiscovery: { invalid: true } }],
+    })
+
+    expect(settings.providers).toEqual([provider])
   })
 })

@@ -2,7 +2,11 @@ import { Settings, Trash2 } from 'lucide-react'
 import { App, Notice, Platform } from 'obsidian'
 import React, { useEffect, useRef, useState } from 'react'
 
-import { DEFAULT_PROVIDERS, PROVIDER_TYPES_INFO } from '../../../constants'
+import {
+  DEFAULT_PROVIDERS,
+  PROVIDER_TYPES_INFO,
+  getProviderInfo,
+} from '../../../constants'
 import { useSettings } from '../../../contexts/settings-context'
 import { CodexCliProvider } from '../../../core/llm/codexCliProvider'
 import { getEmbeddingModelClient } from '../../../core/rag/embedding'
@@ -13,6 +17,7 @@ import {
   AddProviderModal,
   EditProviderModal,
 } from '../modals/ProviderFormModal'
+import { ModelDiscovery } from '../ModelDiscovery'
 
 import { mergeCodexModels } from './codex-models'
 
@@ -261,6 +266,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
             <col />
             <col />
             <col />
+            <col />
             <col className="nrlcmp-col-actions" />
           </colgroup>
           <thead>
@@ -268,6 +274,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
               <th>ID</th>
               <th>Type</th>
               <th>API key / connection</th>
+              <th>Model discovery</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -275,7 +282,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
             {settings.providers.map((provider) => (
               <tr key={provider.id} data-provider-id={provider.id}>
                 <td>{provider.id}</td>
-                <td>{PROVIDER_TYPES_INFO[provider.type].label}</td>
+                <td>{getProviderInfo(provider).label}</td>
                 {provider.type === 'codex-cli' ? (
                   <td>
                     <CodexConnection
@@ -294,6 +301,9 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
                     {provider.apiKey ? '••••••••' : 'Set API key'}
                   </td>
                 )}
+                <td>
+                  <ModelDiscovery plugin={plugin} providerId={provider.id} />
+                </td>
                 <td>
                   <div className="nrlcmp-settings-actions">
                     <button
@@ -329,6 +339,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
                     ? 'Use your local Codex login, without an API key. Install Codex CLI and run codex login, then enable and test the connection.'
                     : 'Codex CLI requires Obsidian desktop. Enable and use it there.'}
                 </td>
+                <td className="setting-item-description">Manual models</td>
                 <td>
                   <button
                     disabled={!Platform.isDesktop}
@@ -342,7 +353,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
           </tbody>
           <tfoot>
             <tr>
-              <td colSpan={4}>
+              <td colSpan={5}>
                 <button
                   onClick={() => {
                     new AddProviderModal(app, plugin).open()

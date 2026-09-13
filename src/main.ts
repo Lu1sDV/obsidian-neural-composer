@@ -18,6 +18,7 @@ import { ChatView } from './ChatView'
 import { ChatProps } from './components/chat-view/Chat'
 import { ConfirmModal } from './components/modals/ConfirmModal'
 import { APPLY_VIEW_TYPE, CHAT_VIEW_TYPE } from './constants'
+import { ModelCatalog } from './core/llm/modelCatalog'
 import { McpManager } from './core/mcp/mcpManager'
 import { DocIndexService } from './core/rag/docIndexService'
 import { FileExplorerDecorator } from './core/rag/fileExplorerDecorator'
@@ -219,6 +220,7 @@ declare const process: NodeProcessLike | undefined
 
 export default class NeuralComposerPlugin extends Plugin {
   settings: NeuralComposerSettings
+  modelCatalog: ModelCatalog
   initialChatProps?: ChatProps
   settingsChangeListeners: ((newSettings: NeuralComposerSettings) => void)[] =
     []
@@ -310,6 +312,7 @@ export default class NeuralComposerPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings()
+    this.modelCatalog = new ModelCatalog(this)
 
     // Load Node.js built-ins once at startup — desktop only, never on mobile.
     // Obsidian desktop exposes Node's `require` on the window object. Calling
@@ -1322,6 +1325,7 @@ export default class NeuralComposerPlugin extends Plugin {
   // --- LIFECYCLE & SERVER MANAGEMENT ---
 
   onunload() {
+    this.modelCatalog?.dispose()
     window.clearInterval(this.heartbeatInterval)
     this.timeoutIds.forEach((id) => window.clearTimeout(id))
     this.timeoutIds = []

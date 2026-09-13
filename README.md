@@ -84,12 +84,16 @@ Search for **"Neural Composer"** in **Settings → Community Plugins → Browse*
 
 Open **Settings → Neural Composer**. The panel has a sidebar with seven tabs:
 
-1. **Providers** — add your API keys (OpenAI, Anthropic, Gemini, Groq, Ollama, etc.)
+1. **Providers** — add your API keys (OpenAI, Anthropic, Gemini, Z.ai, Groq, Ollama, etc.)
 2. **Models** — select your chat, apply, and embedding models
 3. **Graph & Vault** — set the `lightrag-server` path, choose a data directory, and optionally configure a **Watched Folder** for auto-sync
 4. Toggle **Auto-start** on, then click **Restart Server**
 
 A green dot in the status bar confirms the server is running. Right-click any folder in your vault to ingest notes and start chatting.
+
+Model discovery runs after saving credentials and when opening a model picker with a missing or expired catalog (24 hours). There is no background polling. Select a discovered model or enter its name manually; discovery never changes your configured models. Z.ai uses the general API endpoint, not the Coding Plan endpoint.
+
+An authenticated model-list request returning HTTP 404 disables discovery for that provider endpoint, including after restart or key changes. **Refresh** respects this saved state. Use **Reset model discovery** or change the endpoint to try again. Authentication and temporary network failures do not mark an endpoint unsupported.
 
 ---
 
@@ -129,6 +133,7 @@ Neural Composer is designed with privacy as a core principle.
 | Destination | When | Why |
 |:---|:---|:---|
 | **Your AI provider** (OpenAI, Anthropic, Gemini, Groq, etc.) | Every chat message or ingestion | To generate responses and embeddings. Only notes you explicitly ingest or attach are sent. |
+| **Your configured model provider** | After saving credentials, opening a stale model picker, or explicitly refreshing/resetting discovery | To retrieve the model catalog using the configured authentication. No note content is sent. Catalogs and unsupported-endpoint state are saved locally in plugin settings. |
 | **Your local LightRAG server** (`localhost`) | Every query and ingestion | The plugin talks to a Python process on your own machine. No data leaves. |
 | **Your remote LightRAG server** | Only if you configure a remote URL | Off by default. Opt-in only. |
 
@@ -137,7 +142,7 @@ Neural Composer is designed with privacy as a core principle.
 ### What never happens
 
 - The plugin does **not** send telemetry, analytics, or crash reports.
-- The plugin does **not** contact `github.com` or any external domain at runtime. Links in the UI are navigation-only — never fetched programmatically.
+- The plugin does **not** fetch UI documentation or support links automatically. Model discovery contacts configured provider endpoints as described above.
 - API keys are stored **only** in Obsidian's own `data.json` in your local vault.
 
 ### System-level access disclosures
@@ -159,6 +164,10 @@ Neural Composer is designed with privacy as a core principle.
 
 <details>
 <summary>📋 Changelog</summary>
+
+### Unreleased
+- Add Z.ai as a default provider while preserving existing provider settings.
+- Discover provider models with searchable suggestions, a 24-hour cache, manual entry, and persistent suppression after authenticated HTTP 404 responses.
 
 ### v1.4.0 — 2026-05-27
 - **Mobile support (iOS / Android)** — plugin loads on Obsidian mobile and chats against a remote LightRAG server over HTTP. `lightRagUseRemote` is forced on, local-server management settings are hidden, and the bundle ships an `events` polyfill plus a `require` shim so node-only deps don't abort module evaluation on a non-Electron webview.
