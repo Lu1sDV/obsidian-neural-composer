@@ -8,6 +8,8 @@ type ObsidianTextInputProps = {
   placeholder?: string
   onChange: (value: string) => void
   type?: 'text' | 'number'
+  list?: string
+  ariaLabel?: string
 }
 
 export function ObsidianTextInput({
@@ -15,6 +17,8 @@ export function ObsidianTextInput({
   placeholder,
   onChange,
   type,
+  list,
+  ariaLabel,
 }: ObsidianTextInputProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const { setting } = useObsidianSetting()
@@ -57,6 +61,14 @@ export function ObsidianTextInput({
     if (placeholder) textComponent.setPlaceholder(placeholder)
     if (type) textComponent.inputEl.type = type
   }, [textComponent, value, placeholder, type])
+
+  useEffect(() => {
+    if (!textComponent) return
+    if (list) textComponent.inputEl.setAttribute('list', list)
+    else textComponent.inputEl.removeAttribute('list')
+    if (ariaLabel) textComponent.inputEl.setAttribute('aria-label', ariaLabel)
+    else textComponent.inputEl.removeAttribute('aria-label')
+  }, [textComponent, list, ariaLabel])
 
   return <div ref={containerRef} />
 }

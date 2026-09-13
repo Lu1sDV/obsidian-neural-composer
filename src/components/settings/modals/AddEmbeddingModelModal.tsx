@@ -1,7 +1,7 @@
 import { App, Notice } from 'obsidian'
 import { useState } from 'react'
 
-import { DEFAULT_PROVIDERS, PROVIDER_TYPES_INFO } from '../../../constants'
+import { DEFAULT_PROVIDERS, getProviderInfo } from '../../../constants'
 import { getProviderClient } from '../../../core/llm/manager'
 import { supportedDimensionsForIndex } from '../../../database/schema'
 import NeuralComposerPlugin from '../../../main'
@@ -15,6 +15,7 @@ import { ObsidianSetting } from '../../common/ObsidianSetting'
 import { ObsidianTextInput } from '../../common/ObsidianTextInput'
 import { ReactModal } from '../../common/ReactModal'
 import { ConfirmModal } from '../../modals/ConfirmModal'
+import { ModelDiscovery } from '../ModelDiscovery'
 
 type AddEmbeddingModelModalComponentProps = {
   plugin: NeuralComposerPlugin
@@ -141,10 +142,7 @@ function AddEmbeddingModelModalComponent({
           value={formData.providerId}
           options={Object.fromEntries(
             plugin.settings.providers
-              .filter(
-                (provider) =>
-                  PROVIDER_TYPES_INFO[provider.type].supportEmbedding,
-              )
+              .filter((provider) => getProviderInfo(provider).supportEmbedding)
               .map((provider): [string, string] => [provider.id, provider.id]),
           )}
           onChange={(value: string) => {
@@ -164,17 +162,12 @@ function AddEmbeddingModelModalComponent({
         />
       </ObsidianSetting>
 
-      <ObsidianSetting name="Model name" required>
-        {' '}
-        {/* Sentence case */}
-        <ObsidianTextInput
-          value={formData.model}
-          placeholder="Enter the model name"
-          onChange={(value: string) =>
-            setFormData((prev) => ({ ...prev, model: value }))
-          }
-        />
-      </ObsidianSetting>
+      <ModelDiscovery
+        plugin={plugin}
+        providerId={formData.providerId}
+        model={formData.model}
+        onModelChange={(model) => setFormData((prev) => ({ ...prev, model }))}
+      />
 
       <ObsidianSetting>
         {/* Fix: Wrapped async handler to satisfy linter */}

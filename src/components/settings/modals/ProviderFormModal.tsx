@@ -1,7 +1,7 @@
 import { App, Notice } from 'obsidian'
 import { useState } from 'react'
 
-import { PROVIDER_TYPES_INFO } from '../../../constants'
+import { PROVIDER_TYPES_INFO, getProviderInfo } from '../../../constants'
 import NeuralComposerPlugin from '../../../main'
 import { LLMProvider, llmProviderSchema } from '../../../types/provider.types'
 import { ObsidianButton } from '../../common/ObsidianButton'
@@ -10,6 +10,7 @@ import { ObsidianSetting } from '../../common/ObsidianSetting'
 import { ObsidianTextInput } from '../../common/ObsidianTextInput'
 import { ObsidianToggle } from '../../common/ObsidianToggle'
 import { ReactModal } from '../../common/ReactModal'
+import { ModelDiscovery } from '../ModelDiscovery'
 
 type ProviderFormComponentProps = {
   plugin: NeuralComposerPlugin
@@ -60,6 +61,15 @@ function ProviderFormComponent({
   )
 
   const handleSubmit = async () => {
+    if (
+      formData.id === 'zai' &&
+      formData.type === 'openai-compatible' &&
+      !formData.apiKey?.trim()
+    ) {
+      new Notice('An API key is required for this provider')
+      return
+    }
+
     if (provider) {
       const newProviders = [...plugin.settings.providers]
       const currentProviderIndex = newProviders.findIndex(
@@ -83,7 +93,10 @@ function ProviderFormComponent({
         ...plugin.settings,
         providers: [
           ...plugin.settings.providers.slice(0, currentProviderIndex),
-          formData,
+          {
+            ...formData,
+            modelDiscovery: newProviders[currentProviderIndex].modelDiscovery,
+          },
           ...plugin.settings.providers.slice(currentProviderIndex + 1),
         ],
       })
@@ -112,7 +125,7 @@ function ProviderFormComponent({
     onClose()
   }
 
-  const providerTypeInfo = PROVIDER_TYPES_INFO[formData.type]
+  const providerTypeInfo = getProviderInfo(formData)
 
   return (
     <>
@@ -159,7 +172,11 @@ function ProviderFormComponent({
 
       <ObsidianSetting
         name="API key" // Sentence case
-        desc="(leave blank if not required)"
+        desc={
+          providerTypeInfo.requireApiKey
+            ? 'Required for this provider'
+            : '(leave blank if not required)'
+        }
         required={providerTypeInfo.requireApiKey}
       >
         <ObsidianTextInput
@@ -236,6 +253,16 @@ function ProviderFormComponent({
           )}
         </ObsidianSetting>
       ))}
+
+      {provider && (
+        <>
+          <ObsidianSetting
+            name="Model discovery"
+            desc="Uses saved credentials and endpoint. Save changes before refreshing."
+          />
+          <ModelDiscovery plugin={plugin} providerId={provider.id} />
+        </>
+      )}
 
       <ObsidianSetting>
         {/* Fix: Handle floating promise with void wrapper */}

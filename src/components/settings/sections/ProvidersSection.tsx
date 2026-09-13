@@ -2,7 +2,7 @@ import { Settings, Trash2 } from 'lucide-react'
 import { App } from 'obsidian'
 import React from 'react'
 
-import { DEFAULT_PROVIDERS, PROVIDER_TYPES_INFO } from '../../../constants'
+import { DEFAULT_PROVIDERS, getProviderInfo } from '../../../constants'
 import { useSettings } from '../../../contexts/settings-context'
 import { getEmbeddingModelClient } from '../../../core/rag/embedding'
 import NeuralComposerPlugin from '../../../main'
@@ -12,6 +12,7 @@ import {
   AddProviderModal,
   EditProviderModal,
 } from '../modals/ProviderFormModal'
+import { ModelDiscovery } from '../ModelDiscovery'
 
 type ProvidersSectionProps = {
   app: App
@@ -108,6 +109,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
             <col />
             <col />
             <col />
+            <col />
             <col className="nrlcmp-col-actions" />
           </colgroup>
           <thead>
@@ -115,6 +117,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
               <th>ID</th>
               <th>Type</th>
               <th>API Key</th>
+              <th>Model discovery</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -122,7 +125,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
             {settings.providers.map((provider) => (
               <tr key={provider.id}>
                 <td>{provider.id}</td>
-                <td>{PROVIDER_TYPES_INFO[provider.type].label}</td>
+                <td>{getProviderInfo(provider).label}</td>
                 <td
                   className="nrlcmp-settings-table-api-key"
                   onClick={() => {
@@ -130,6 +133,9 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
                   }}
                 >
                   {provider.apiKey ? '••••••••' : 'Set API key'}
+                </td>
+                <td>
+                  <ModelDiscovery plugin={plugin} providerId={provider.id} />
                 </td>
                 <td>
                   <div className="nrlcmp-settings-actions">
@@ -158,7 +164,7 @@ export function ProvidersSection({ app, plugin }: ProvidersSectionProps) {
           </tbody>
           <tfoot>
             <tr>
-              <td colSpan={4}>
+              <td colSpan={5}>
                 <button
                   onClick={() => {
                     new AddProviderModal(app, plugin).open()

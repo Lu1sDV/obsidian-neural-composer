@@ -166,10 +166,23 @@ export const PROVIDER_TYPES_INFO = {
   }
 >
 
+const ZAI_PROVIDER_INFO = {
+  ...PROVIDER_TYPES_INFO['openai-compatible'],
+  label: 'Z.ai',
+  requireApiKey: true,
+  supportEmbedding: false,
+} as const
+
+export function getProviderInfo(provider: Pick<LLMProvider, 'id' | 'type'>) {
+  return provider.id === 'zai' && provider.type === 'openai-compatible'
+    ? ZAI_PROVIDER_INFO
+    : PROVIDER_TYPES_INFO[provider.type]
+}
+
 /**
  * Important
  * 1. When adding new default provider, settings migration should be added
- * 2. If there's same provider id in user's settings, it's data should be overwritten by default provider
+ * 2. Existing provider ids and their settings must be preserved on migration.
  */
 export const DEFAULT_PROVIDERS: readonly LLMProvider[] = [
   {
@@ -215,6 +228,11 @@ export const DEFAULT_PROVIDERS: readonly LLMProvider[] = [
   {
     type: 'morph',
     id: PROVIDER_TYPES_INFO.morph.defaultProviderId,
+  },
+  {
+    type: 'openai-compatible',
+    id: 'zai',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
   },
 ]
 

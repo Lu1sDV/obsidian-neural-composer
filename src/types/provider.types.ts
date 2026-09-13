@@ -1,10 +1,13 @@
 import { z } from 'zod'
 
+import { modelDiscoverySchema } from '../core/llm/modelCatalog'
+
 export const baseLlmProviderSchema = z.object({
   id: z.string().min(1, 'id is required'),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   additionalSettings: z.record(z.string(), z.string()).optional(),
+  modelDiscovery: modelDiscoverySchema.optional().catch(undefined),
 })
 
 /**
