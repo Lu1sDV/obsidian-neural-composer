@@ -41,6 +41,110 @@ const eventSchema = z.object({
     .optional(),
 })
 
+export type CodexDiscoveredModel = {
+  model: string
+  displayName: string
+  isDefault: boolean
+}
+
+const modelPageSchema = z.object({
+  data: z.array(
+    z.object({
+      model: z.string().trim().min(1),
+      displayName: z.string(),
+      isDefault: z.boolean(),
+      hidden: z.boolean(),
+      inputModalities: z.array(z.string()).default(['text', 'image']),
+    }),
+  ),
+  nextCursor: z.string().nullable().optional(),
+})
+
+const rpcMessageSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  method: z.string().optional(),
+  result: z.unknown().optional(),
+  error: z.object({ code: z.number(), message: z.string() }).optional(),
+})
+
+function authEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  // Keep CODEX_HOME for login, but not inherited CLI execution overrides.
+  for (const key of Object.keys(env)) {
+    if (
+      (key.startsWith('CODEX_') && key !== 'CODEX_HOME') ||
+      key === 'OPENAI_API_KEY' ||
+      key === 'OPENAI_BASE_URL'
+    ) {
+      delete env[key]
+    }
+  }
+  return env
+}
+
+function ownProcess(
+  child: ChildProcess.ChildProcess,
+  spawn: typeof ChildProcess.spawn,
+  lines: Readline.Interface,
+) {
+  let didClose = false
+  let killTimer: NodeJS.Timeout | undefined
+  let terminating = false
+  const closed = new Promise<{ code: number | null; signal: string | null }>(
+    (resolve) => {
+      child.once('close', (code, signal) => {
+        didClose = true
+        clearTimeout(killTimer)
+        if (terminating && process.platform !== 'win32' && child.pid) {
+          // The parent may exit before a descendant handles SIGTERM.
+          try {
+            process.kill(-child.pid, 'SIGKILL')
+          } catch {
+            /* Already gone. */
+          }
+        }
+        resolve({ code, signal })
+      })
+    },
+  )
+  const terminate = () => {
+    if (didClose || terminating) return
+    terminating = true
+    lines.close()
+    if (process.platform === 'win32' && child.pid) {
+      const killer = spawn(
+        'taskkill',
+        ['/pid', String(child.pid), '/T', '/F'],
+        {
+          shell: false,
+          windowsHide: true,
+          stdio: 'ignore',
+        },
+      )
+      killer.on('error', () => child.kill('SIGKILL'))
+    } else if (child.pid) {
+      try {
+        process.kill(-child.pid, 'SIGTERM')
+      } catch {
+        child.kill('SIGTERM')
+      }
+    }
+    killTimer = setTimeout(() => {
+      if (didClose) return
+      if (process.platform !== 'win32' && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          child.kill('SIGKILL')
+        }
+      } else {
+        child.kill('SIGKILL')
+      }
+    }, 1000)
+  }
+  return { closed, terminate }
+}
+
 const textInstructions =
   'You are a text-only conversation assistant, not a coding agent. The user input is a JSON conversation with ordered system, user, and assistant messages. Preserve their roles: follow the supplied system instructions and answer the last user turn in context. Return only the assistant response, not the transcript. Do not use tools, inspect the environment, or write files. For editing requests, return the proposed text; the application handles applying changes.'
 
@@ -83,9 +187,306 @@ function cliError(message: string): Error {
   return new Error(`Codex CLI: ${message}`)
 }
 
+class CodexConnectionError extends Error {}
+
 export class CodexCliProvider extends BaseLLMProvider<
   Extract<LLMProvider, { type: 'codex-cli' }>
 > {
+  // Only locally authored discovery errors may cross the settings UI boundary.
+  async testConnection(options?: LLMOptions): Promise<CodexDiscoveredModel[]> {
+    if (!Platform.isDesktop) {
+      throw new Error('Codex CLI is available only in Obsidian desktop.')
+    }
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    options?.signal?.addEventListener('abort', abort, { once: true })
+    if (options?.signal?.aborted) abort()
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      abort()
+    }, 60000)
+    let discovering = true
+    try {
+      const models = await this.discoverModels(controller.signal)
+      discovering = false
+      const selected = models.find((model) => model.isDefault) ?? models[0]
+      await this.generateResponse(
+        {
+          id: 'codex-connection-test',
+          providerId: this.provider.id,
+          providerType: 'codex-cli',
+          model: selected.model,
+        },
+        {
+          model: selected.model,
+          messages: [{ role: 'user', content: 'Reply with only OK.' }],
+        },
+        { signal: controller.signal },
+      )
+      if (controller.signal.aborted) throw new Error('aborted')
+      return models
+    } catch (error) {
+      if (timedOut) throw new Error('Codex CLI connection test timed out.')
+      if (controller.signal.aborted) {
+        const aborted = new Error('Codex CLI connection test aborted')
+        aborted.name = 'AbortError'
+        throw aborted
+      }
+      // exec diagnostics can contain account details; never expose them here.
+      const message = error instanceof Error ? error.message : ''
+      if (
+        /not logged in|login required|unauthorized|authentication|401|refresh.?token|missing.*api.?key/i.test(
+          message,
+        )
+      ) {
+        throw new Error(
+          'Codex CLI authentication failed. Run codex login using the configured executable and user account, then retry.',
+        )
+      }
+      if (discovering && error instanceof CodexConnectionError) {
+        throw error
+      }
+      throw new Error(
+        discovering
+          ? 'Codex CLI returned an incompatible discovery protocol. Update Codex CLI and retry.'
+          : 'Codex CLI could not complete a text response. Check your account access and Codex CLI setup, then retry.',
+      )
+    } finally {
+      clearTimeout(timeout)
+      options?.signal?.removeEventListener('abort', abort)
+    }
+  }
+
+  private async discoverModels(
+    signal: AbortSignal,
+  ): Promise<CodexDiscoveredModel[]> {
+    if (signal.aborted) throw new Error('aborted')
+    const desktopWindow = window as unknown as {
+      require: (id: string) => unknown
+    }
+    const nodeRequire = desktopWindow.require
+    const { spawn } = nodeRequire('child_process') as typeof ChildProcess
+    const nodeFs = nodeRequire('fs') as typeof FileSystem
+    const fs = nodeFs.promises
+    const path = nodeRequire('path') as typeof NodePath
+    const { tmpdir } = nodeRequire('os') as typeof OperatingSystem
+    const { createInterface } = nodeRequire('readline') as typeof Readline
+    const cwd = await fs.mkdtemp(path.join(tmpdir(), 'neural-composer-codex-'))
+    try {
+      if (signal.aborted) throw new Error('aborted')
+      const child = spawn(
+        this.provider.additionalSettings?.executablePath?.trim() || 'codex',
+        [
+          'app-server',
+          '--listen',
+          'stdio://',
+          '--strict-config',
+          '-c',
+          'model_provider="openai"',
+          '-c',
+          'mcp_servers={}',
+          '-c',
+          'analytics.enabled=false',
+          ...disabledFeatures.flatMap((feature) => ['--disable', feature]),
+        ],
+        {
+          cwd,
+          env: authEnvironment(),
+          shell: false,
+          windowsHide: true,
+          detached: process.platform !== 'win32',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      )
+      const lines = createInterface({
+        input: child.stdout,
+        crlfDelay: Infinity,
+      })
+      const { closed, terminate } = ownProcess(child, spawn, lines)
+      let failure: Error | undefined
+      let pending:
+        | {
+            id: number
+            resolve: (value: unknown) => void
+            reject: (error: Error) => void
+          }
+        | undefined
+      const fail = (error: Error) => {
+        failure ??= error
+        pending?.reject(failure)
+        pending = undefined
+        terminate()
+      }
+      const onAbort = () => fail(new Error('aborted'))
+      child.once('error', (error: NodeJS.ErrnoException) => {
+        fail(
+          new CodexConnectionError(
+            error.code === 'ENOENT'
+              ? 'Codex executable not found. Install Codex CLI or set its full executable path in provider settings.'
+              : 'Could not start Codex CLI. Check the executable path and permissions.',
+          ),
+        )
+      })
+      child.stdin.on('error', () =>
+        fail(
+          new CodexConnectionError(
+            'Codex CLI discovery protocol input failed.',
+          ),
+        ),
+      )
+      // Drain diagnostics without retaining account identifiers or credentials.
+      child.stderr.resume()
+      child.once('close', () => {
+        if (pending)
+          fail(
+            new CodexConnectionError(
+              'Codex CLI exited before discovery completed. Check your Codex CLI setup.',
+            ),
+          )
+      })
+      lines.on('line', (line: string) => {
+        if (failure || !line.trim()) return
+        try {
+          const message = rpcMessageSchema.parse(JSON.parse(line))
+          if (message.method !== undefined) {
+            if (message.id !== undefined) {
+              child.stdin.write(
+                JSON.stringify({
+                  id: message.id,
+                  error: {
+                    code: -32601,
+                    message:
+                      'Client requests are not supported during model discovery.',
+                  },
+                }) + '\n',
+              )
+              fail(
+                new CodexConnectionError(
+                  'Codex CLI requested unsupported client interaction during discovery. Run codex login in a terminal and retry.',
+                ),
+              )
+            }
+            return
+          }
+          if (
+            !pending ||
+            message.id !== pending.id ||
+            (message.error === undefined) ===
+              !Object.prototype.hasOwnProperty.call(message, 'result')
+          ) {
+            throw new Error('Invalid response')
+          }
+          if (message.error) {
+            fail(
+              new CodexConnectionError(
+                /unauthorized|authentication|401|refresh.?token|login|api.?key/i.test(
+                  message.error.message,
+                )
+                  ? 'Codex CLI authentication failed.'
+                  : 'Codex CLI discovery request failed. Update Codex CLI and check your account access.',
+              ),
+            )
+            return
+          }
+          const request = pending
+          pending = undefined
+          request.resolve(message.result)
+        } catch {
+          fail(
+            new CodexConnectionError(
+              'Codex CLI returned an incompatible discovery protocol. Update Codex CLI and retry.',
+            ),
+          )
+        }
+      })
+      let id = 0
+      const rpc = (method: string, params: unknown): Promise<unknown> => {
+        if (failure) return Promise.reject(failure)
+        return new Promise((resolve, reject) => {
+          pending = { id: ++id, resolve, reject }
+          child.stdin.write(JSON.stringify({ id, method, params }) + '\n')
+        })
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      try {
+        if (signal.aborted) onAbort()
+        z.object({ userAgent: z.string() }).parse(
+          await rpc('initialize', {
+            clientInfo: {
+              name: 'neural_composer',
+              title: 'Neural Composer',
+              version: '1.0.0',
+            },
+            capabilities: { experimentalApi: false },
+          }),
+        )
+        child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n')
+        const account = z
+          .object({
+            account: z
+              .object({ type: z.enum(['chatgpt', 'apiKey', 'amazonBedrock']) })
+              .nullish(),
+            requiresOpenaiAuth: z.boolean(),
+          })
+          .parse(await rpc('account/read', { refreshToken: true }))
+        if (!account.account || account.account.type === 'amazonBedrock') {
+          throw new Error('Codex CLI authentication failed.')
+        }
+        const models = new Map<string, CodexDiscoveredModel>()
+        const cursors = new Set<string>()
+        let cursor: string | null = null
+        do {
+          const page = modelPageSchema.parse(
+            await rpc('model/list', {
+              cursor,
+              limit: 100,
+              includeHidden: false,
+            }),
+          )
+          for (const model of page.data) {
+            if (model.hidden || !model.inputModalities.includes('text'))
+              continue
+            const previous = models.get(model.model)
+            models.set(model.model, {
+              model: model.model,
+              displayName:
+                previous?.displayName || model.displayName || model.model,
+              isDefault: model.isDefault || previous?.isDefault === true,
+            })
+          }
+          cursor = page.nextCursor ?? null
+          if (cursor !== null) {
+            if (cursors.has(cursor))
+              throw new CodexConnectionError(
+                'Codex CLI returned a repeated discovery cursor.',
+              )
+            cursors.add(cursor)
+          }
+        } while (cursor !== null)
+        if (!models.size)
+          throw new CodexConnectionError(
+            'Codex CLI returned no visible text-capable models.',
+          )
+        child.stdin.end()
+        const result = await closed
+        if (failure) throw failure
+        if (result.code !== 0)
+          throw new CodexConnectionError(
+            'Codex CLI discovery exited unsuccessfully. Check your Codex CLI setup.',
+          )
+        return [...models.values()]
+      } finally {
+        signal.removeEventListener('abort', onAbort)
+        terminate()
+        await closed
+        lines.close()
+      }
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true })
+    }
+  }
+
   async generateResponse(
     model: ChatModel,
     request: LLMRequestNonStreaming,
@@ -272,17 +673,7 @@ export class CodexCliProvider extends BaseLLMProvider<
       ]
       const executable =
         this.provider.additionalSettings?.executablePath?.trim() || 'codex'
-      const env = { ...process.env }
-      // Keep CODEX_HOME for login, but not inherited CLI execution overrides.
-      for (const key of Object.keys(env)) {
-        if (
-          (key.startsWith('CODEX_') && key !== 'CODEX_HOME') ||
-          key === 'OPENAI_API_KEY' ||
-          key === 'OPENAI_BASE_URL'
-        ) {
-          delete env[key]
-        }
-      }
+      const env = authEnvironment()
       const child = spawn(executable, args, {
         cwd,
         env,
@@ -298,27 +689,7 @@ export class CodexCliProvider extends BaseLLMProvider<
       let stderr = ''
       let spawnError: NodeJS.ErrnoException | undefined
       let inputError: Error | undefined
-      let didClose = false
-      let killTimer: NodeJS.Timeout | undefined
-      let terminating = false
-      const closed = new Promise<{
-        code: number | null
-        signal: string | null
-      }>((resolve) => {
-        child.once('close', (code, signal) => {
-          didClose = true
-          clearTimeout(killTimer)
-          if (terminating && process.platform !== 'win32' && child.pid) {
-            // The parent may exit before a descendant handles SIGTERM.
-            try {
-              process.kill(-child.pid, 'SIGKILL')
-            } catch {
-              /* Already gone. */
-            }
-          }
-          resolve({ code, signal })
-        })
-      })
+      const { closed, terminate } = ownProcess(child, spawn, lines)
       child.once('error', (error: NodeJS.ErrnoException) => {
         spawnError = error
         lines.close()
@@ -330,43 +701,6 @@ export class CodexCliProvider extends BaseLLMProvider<
       child.stderr.on('data', (text: string) => {
         stderr = (stderr + text).slice(-16384)
       })
-      const terminate = () => {
-        if (didClose || terminating) return
-        terminating = true
-        lines.close()
-        if (process.platform === 'win32' && child.pid) {
-          const killer = spawn(
-            'taskkill',
-            ['/pid', String(child.pid), '/T', '/F'],
-            {
-              shell: false,
-              windowsHide: true,
-              stdio: 'ignore',
-            },
-          )
-          killer.on('error', () => {
-            child.kill('SIGKILL')
-          })
-        } else if (child.pid) {
-          try {
-            process.kill(-child.pid, 'SIGTERM')
-          } catch {
-            child.kill('SIGTERM')
-          }
-        }
-        killTimer = setTimeout(() => {
-          if (didClose) return
-          if (process.platform !== 'win32' && child.pid) {
-            try {
-              process.kill(-child.pid, 'SIGKILL')
-            } catch {
-              child.kill('SIGKILL')
-            }
-          } else {
-            child.kill('SIGKILL')
-          }
-        }, 1000)
-      }
       options?.signal?.addEventListener('abort', terminate, { once: true })
       let id = uuidv4()
       let contentReceived = false

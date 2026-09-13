@@ -72,6 +72,54 @@ class FakeCli extends EventEmitter {
   }
 }
 
+type RpcRequest = {
+  id: number
+  method: string
+  params: Record<string, unknown>
+}
+
+const listedModel = {
+  model: 'codex-first',
+  displayName: 'Codex First',
+  isDefault: false,
+  hidden: false,
+  inputModalities: ['text', 'image'],
+}
+
+function useAppServer(
+  respond: (request: RpcRequest, child: FakeCli) => unknown,
+  account: unknown = {
+    type: 'chatgpt',
+    email: 'private@example.test',
+    planType: 'plus',
+  },
+) {
+  const child = useCli((cli) => cli.finish())
+  let buffer = ''
+  child.stdin.on('data', (text: string) => {
+    buffer += text
+    let newline: number
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const message = JSON.parse(buffer.slice(0, newline)) as RpcRequest
+      buffer = buffer.slice(newline + 1)
+      setImmediate(() => {
+        if (child.closed) return
+        if (message.method === 'initialized' || !message.method) return
+        const result =
+          message.method === 'initialize'
+            ? { userAgent: 'fake-codex' }
+            : message.method === 'account/read'
+              ? { account, requiresOpenaiAuth: true }
+              : respond(message, child)
+        if (result !== undefined) {
+          child.stdout.write(JSON.stringify({ id: message.id, result }) + '\n')
+        }
+      })
+    }
+  })
+  return child
+}
+
 function useCli(onInput: (child: FakeCli) => void) {
   const child = new FakeCli(onInput)
   mockedSpawn.mockReturnValueOnce(child as unknown as ChildProcess)
@@ -83,10 +131,12 @@ function useCli(onInput: (child: FakeCli) => void) {
 }
 
 async function expectWorkspaceRemoved() {
-  const options = mockedSpawn.mock.calls[0][2]
-  await expect(access(String(options?.cwd))).rejects.toMatchObject({
-    code: 'ENOENT',
-  })
+  for (const call of mockedSpawn.mock.calls) {
+    if (!call[2]?.cwd) continue
+    await expect(access(String(call[2].cwd))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  }
 }
 
 afterEach(() => {
@@ -302,4 +352,227 @@ describe('Codex CLI text provider', () => {
     ).rejects.toMatchObject({ name: 'AbortError' })
     expect(mockedSpawn).not.toHaveBeenCalled()
   })
+})
+
+describe('Codex CLI connection discovery', () => {
+  it('collects paged visible text models and waits for a real default-model completion', async () => {
+    const server = useAppServer((rpc, cli) => {
+      cli.stdout.write(
+        JSON.stringify({
+          method: 'remoteControl/status/changed',
+          params: { status: 'disabled' },
+        }) + '\n',
+      )
+      if (rpc.params.cursor === null) {
+        return {
+          data: [
+            listedModel,
+            { ...listedModel, model: 'hidden', hidden: true },
+            { ...listedModel, model: 'audio', inputModalities: ['audio'] },
+          ],
+          nextCursor: 'page-two',
+        }
+      }
+      expect(rpc.params.cursor).toBe('page-two')
+      return {
+        data: [
+          listedModel,
+          {
+            ...listedModel,
+            model: 'codex-default',
+            displayName: 'Codex Default',
+            isDefault: true,
+          },
+        ],
+        nextCursor: null,
+      }
+    })
+    let finishInference: () => void = () => undefined
+    let inferenceReady: () => void = () => undefined
+    const started = new Promise<void>((resolve) => {
+      inferenceReady = resolve
+    })
+    useCli((cli) => {
+      finishInference = () => {
+        cli.stdout.write(
+          JSON.stringify({
+            type: 'item.completed',
+            item: { type: 'agent_message', text: 'OK' },
+          }) + '\n',
+        )
+        cli.stdout.write('{"type":"turn.completed"}\n')
+        cli.finish()
+      }
+      inferenceReady()
+    })
+    let resolved = false
+    const result = provider.testConnection().then((models) => {
+      resolved = true
+      return models
+    })
+    await started
+    expect(resolved).toBe(false)
+    expect(server.closed).toBe(true)
+    expect(mockedSpawn.mock.calls[1][1]).toEqual(
+      expect.arrayContaining(['--model', 'codex-default']),
+    )
+    finishInference()
+    await expect(result).resolves.toEqual([
+      { model: 'codex-first', displayName: 'Codex First', isDefault: false },
+      { model: 'codex-default', displayName: 'Codex Default', isDefault: true },
+    ])
+    await expectWorkspaceRemoved()
+  })
+
+  it('rejects missing login without attempting inference', async () => {
+    const server = useAppServer(() => {
+      throw new Error('Unexpected model request')
+    }, null)
+    await expect(provider.testConnection()).rejects.toThrow('codex login')
+    expect(mockedSpawn).toHaveBeenCalledTimes(1)
+    expect(server.closed).toBe(true)
+    await expectWorkspaceRemoved()
+  })
+
+  it('does not expose authentication diagnostics from a failed inference', async () => {
+    useAppServer(() => ({ data: [listedModel], nextCursor: null }))
+    useCli((cli) => {
+      cli.stdout.write(
+        JSON.stringify({
+          type: 'turn.failed',
+          error: {
+            message: '401 unauthorized private@example.test token=secret',
+          },
+        }) + '\n',
+      )
+      cli.finish(1)
+    })
+    const result = provider.testConnection()
+    await expect(result).rejects.toThrow(/authentication failed/)
+    await expect(result).rejects.not.toThrow(/private@example\.test|secret/)
+    await expectWorkspaceRemoved()
+  })
+
+  it('cancels inference after discovery without returning the collected models', async () => {
+    useAppServer(() => ({ data: [listedModel], nextCursor: null }))
+    const controller = new AbortController()
+    const inference = useCli(() => controller.abort())
+    await expect(
+      provider.testConnection({ signal: controller.signal }),
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(inference.closed).toBe(true)
+    await expectWorkspaceRemoved()
+  })
+
+  it.each([
+    [
+      'no text models',
+      {
+        data: [{ ...listedModel, inputModalities: ['audio'] }],
+        nextCursor: null,
+      },
+      /no visible text-capable models/,
+    ],
+    [
+      'invalid model fields',
+      { data: [{ ...listedModel, isDefault: 'yes' }], nextCursor: null },
+      /incompatible discovery protocol/,
+    ],
+    [
+      'repeated cursor',
+      { data: [listedModel], nextCursor: 'again' },
+      /repeated discovery cursor/,
+    ],
+  ])('rejects %s before inference', async (_name, page, error) => {
+    useAppServer(() => page)
+    await expect(provider.testConnection()).rejects.toThrow(error)
+    expect(mockedSpawn).toHaveBeenCalledTimes(1)
+    await expectWorkspaceRemoved()
+  })
+
+  it('rejects server-initiated requests instead of waiting for interactive authentication', async () => {
+    const server = useAppServer((_rpc, cli) => {
+      cli.stdout.write(
+        JSON.stringify({
+          id: 'server-request',
+          method: 'account/chatgptAuthTokens/refresh',
+          params: { reason: 'unauthorized' },
+        }) + '\n',
+      )
+    })
+    await expect(provider.testConnection()).rejects.toThrow(
+      'unsupported client interaction',
+    )
+    expect(server.input).toContain('"code":-32601')
+    expect(server.closed).toBe(true)
+    await expectWorkspaceRemoved()
+  })
+
+  it('rejects a nonzero discovery exit even after receiving models', async () => {
+    const server = useAppServer(() => ({
+      data: [listedModel],
+      nextCursor: null,
+    }))
+    server.stdin.on('finish', () => server.finish(17))
+    await expect(provider.testConnection()).rejects.toThrow(
+      'discovery exited unsuccessfully',
+    )
+    expect(mockedSpawn).toHaveBeenCalledTimes(1)
+    await expectWorkspaceRemoved()
+  })
+
+  it('reports a missing discovery executable and removes its workspace', async () => {
+    const server = useAppServer(() => undefined)
+    server.stdin.once('data', () => {
+      server.emit(
+        'error',
+        Object.assign(new Error('private executable path'), { code: 'ENOENT' }),
+      )
+      server.finish(-2)
+    })
+    await expect(provider.testConnection()).rejects.toThrow(
+      'Codex executable not found',
+    )
+    await expectWorkspaceRemoved()
+  })
+
+  it.each(['cancel', 'timeout'])(
+    'cleans a hung protocol on %s',
+    async (reason) => {
+      let ready: () => void = () => undefined
+      const started = new Promise<void>((resolve) => {
+        ready = resolve
+      })
+      const server = useAppServer(() => {
+        ready()
+      })
+      const controller = new AbortController()
+      let timeoutCallback: (() => void) | undefined
+      const originalSetTimeout = global.setTimeout
+      jest.spyOn(global, 'setTimeout').mockImplementation(((
+        callback: () => void,
+        delay: number,
+      ) => {
+        if (delay === 60000) {
+          timeoutCallback = callback
+          return originalSetTimeout(() => undefined, 60000)
+        }
+        return originalSetTimeout(callback, delay)
+      }) as typeof setTimeout)
+      const result = provider.testConnection({ signal: controller.signal })
+      const rejected =
+        reason === 'cancel'
+          ? expect(result).rejects.toMatchObject({ name: 'AbortError' })
+          : expect(result).rejects.toThrow('timed out')
+      await started
+      if (reason === 'cancel') controller.abort()
+      else timeoutCallback?.()
+      await rejected
+      expect(server.closed).toBe(true)
+      expect(mockedSpawn).toHaveBeenCalledTimes(1)
+      await expectWorkspaceRemoved()
+    },
+  )
 })
