@@ -145,7 +145,7 @@ export class RAGEngine {
 
       const boundary = '----ObsidianBoundary' + Date.now().toString(16)
 
-      const prePart = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: application/octet-stream\r\n\r\n`
+      const prePart = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.path}"\r\nContent-Type: application/octet-stream\r\n\r\n`
       const postPart = `\r\n--${boundary}--\r\n`
 
       const preBuffer = new TextEncoder().encode(prePart)
