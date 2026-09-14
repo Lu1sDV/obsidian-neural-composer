@@ -536,6 +536,8 @@ describe('ModelCatalog', () => {
     expect(service.get('azure').status).toBe('manual')
     expect(service.get('openai').status).toBe('missing-key')
     expect(service.get('zai').status).toBe('missing-key')
+    expect(service.get('openai').error).toBeUndefined()
+    expect(service.get('zai').error).toBeUndefined()
     expect(service.get('gemini').status).toBe('error')
     expect(fetchModels).not.toHaveBeenCalled()
   })

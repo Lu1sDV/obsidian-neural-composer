@@ -232,7 +232,6 @@ function configuration(provider: CatalogProvider): Configuration {
     return {
       ...config,
       status: 'missing-key',
-      error: 'Save an API key to discover available models.',
     }
   }
   return config
