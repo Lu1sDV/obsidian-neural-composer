@@ -11,7 +11,7 @@ jest.mock('obsidian', () => ({
 const mockCast = <T>(value: unknown): T => value as T
 
 describe('RAGEngine binary ingestion', () => {
-  it('uploads the vault-relative path as the multipart filename', async () => {
+  it('uploads a basename accepted by LightRAG', async () => {
     const readBinary = jest
       .fn()
       .mockResolvedValue(new Uint8Array([1, 2, 3]).buffer)
@@ -38,7 +38,7 @@ describe('RAGEngine binary ingestion', () => {
     }
     expect(request.body).toBeInstanceOf(ArrayBuffer)
     expect(new TextDecoder().decode(request.body as ArrayBuffer)).toContain(
-      'filename="Projects/A/report.pdf"',
+      'filename="report.pdf"',
     )
   })
 })
