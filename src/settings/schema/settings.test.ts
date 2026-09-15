@@ -103,7 +103,6 @@ describe('parseNeuralComposerSettings', () => {
       lightRagChunkOverlap: 100,
       lightRagVaultNamespace: '',
       lightRagBackendIdentity: '',
-      lightRagImageDownloadsDisabledFor: '',
     })
     expect(DEFAULT_SETTINGS.lightRagEntityTypeGuidance).toContain(
       'Person: Human individuals, real or fictional',
@@ -116,7 +115,6 @@ describe('parseNeuralComposerSettings', () => {
       lightRagChunkOverlap: 80,
       lightRagVaultNamespace: '',
       lightRagBackendIdentity: '',
-      lightRagImageDownloadsDisabledFor: '',
     })
     expect(settings.lightRagEntityTypeGuidance).toContain(
       'Person: Human individuals, real or fictional',

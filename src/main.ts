@@ -1475,7 +1475,6 @@ export default class NeuralComposerPlugin extends Plugin {
         envContent += `ENTITY_TYPE_PROMPT_FILE=${ENTITY_TYPE_PROFILE_NAME}\n`
         envContent += `ENTITY_TYPES='${JSON.stringify(typeNames)}'\n`
       }
-
       // Custom Overrides
       if (this.settings.lightRagCustomEnv) {
         envContent += `\n\n#####################################\n`
@@ -1485,6 +1484,13 @@ export default class NeuralComposerPlugin extends Plugin {
         envContent += this.settings.lightRagCustomEnv
         envContent += `\n`
       }
+
+      // Hard privacy pin: native Markdown parsing must never fetch remote
+      // images — external hosts would learn what private notes reference.
+      // Emitted after custom overrides because dotenv applies the last
+      // assignment, so the vault side cannot re-enable image downloads.
+      envContent += `\n# External image download (hard privacy pin)\n`
+      envContent += `NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false\n`
 
       return envContent
     } catch (err) {
@@ -1561,14 +1567,6 @@ export default class NeuralComposerPlugin extends Plugin {
     }
 
     try {
-      await this.setSettings({
-        ...this.settings,
-        lightRagImageDownloadsDisabledFor: '',
-      })
-      if (!this.isEnvEditorSnapshotCurrent(snapshot)) {
-        new Notice('Server configuration changed; reopen it before saving.')
-        return false
-      }
       this.writeEntityTypeProfile()
       this.writeEnvFileVerified(
         snapshot.envPath,
@@ -1948,7 +1946,6 @@ export default class NeuralComposerPlugin extends Plugin {
     if (!Platform.isDesktop) {
       if (!this.settings.lightRagUseRemote) {
         this.settings.lightRagBackendIdentity = uuidv4()
-        this.settings.lightRagImageDownloadsDisabledFor = ''
       }
       this.settings.lightRagUseRemote = true
       this.settings.enableAutoStartServer = false
@@ -1968,15 +1965,7 @@ export default class NeuralComposerPlugin extends Plugin {
       newSettings.lightRagUseRemote !== this.settings.lightRagUseRemote ||
       newSettings.lightRagWorkDir !== this.settings.lightRagWorkDir
     if (connectionChanged) {
-      newSettings = {
-        ...newSettings,
-        lightRagBackendIdentity: uuidv4(),
-        lightRagImageDownloadsDisabledFor: '',
-      }
-    } else if (
-      newSettings.lightRagCustomEnv !== this.settings.lightRagCustomEnv
-    ) {
-      newSettings = { ...newSettings, lightRagImageDownloadsDisabledFor: '' }
+      newSettings = { ...newSettings, lightRagBackendIdentity: uuidv4() }
     }
     const ownershipChanged =
       newSettings.lightRagBackendIdentity !==
@@ -2010,50 +1999,7 @@ export default class NeuralComposerPlugin extends Plugin {
     await this.setSettings({
       ...this.settings,
       lightRagBackendIdentity: uuidv4(),
-      lightRagImageDownloadsDisabledFor: '',
     })
-  }
-
-  public async configureParagraphPrivacy(): Promise<void> {
-    if (!Platform.isDesktop || this.isRemoteServer())
-      throw new Error('Configure image downloading on the remote server.')
-    const source = this.readEnvFileSource()
-    if (this.mergeGeneratedEnv(source.originalContent, '') === null)
-      throw new Error(
-        'Managed environment markers are malformed or ambiguous; original file was kept.',
-      )
-    const privacyOverride = 'NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false'
-    const customEnv = this.settings.lightRagCustomEnv.trimEnd()
-    await this.setSettings({
-      ...this.settings,
-      lightRagCustomEnv: customEnv.endsWith(privacyOverride)
-        ? `${customEnv}\n`
-        : `${customEnv}${customEnv ? '\n' : ''}${privacyOverride}\n`,
-      lightRagImageDownloadsDisabledFor: '',
-    })
-    if (!this.isEnvEditorSnapshotCurrent(source))
-      throw new Error(
-        'Server connection changed; configuration was not replaced.',
-      )
-    const snapshot = this.prepareEnvEditorSnapshot(source)
-    if (!this.isEnvEditorSnapshotCurrent(snapshot))
-      throw new Error(
-        'Server connection changed; configuration was not replaced.',
-      )
-    this.writeEnvFileVerified(
-      snapshot.envPath,
-      snapshot.originalContent,
-      snapshot.content,
-      snapshot.originalExists,
-    )
-    if (!this.isEnvEditorSnapshotCurrent(snapshot))
-      throw new Error(
-        'Server connection changed; configuration was not restarted.',
-      )
-    this.restartLightRagServer(true)
-    new Notice(
-      'Image downloads disabled in configuration. After restart, confirm the running server setting in document processing.',
-    )
   }
 
   private ensureDocIndex(): Promise<DocIndexService> {

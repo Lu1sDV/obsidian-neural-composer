@@ -990,11 +990,7 @@ export class RAGEngine {
     ownership: OperationOwnership,
     signal?: AbortSignal,
   ): Promise<string> {
-    if (
-      this.isOwnershipStopped(ownership, signal) ||
-      (policy.mode === 'paragraph' &&
-        this.settings.lightRagImageDownloadsDisabledFor !== ownership.backendId)
-    ) {
+    if (this.isOwnershipStopped(ownership, signal)) {
       throw new SubmissionRejectedError('Upload stopped before submission.')
     }
     let response: RequestUrlResponse
@@ -1540,16 +1536,6 @@ export class RAGEngine {
       )
     }
     if (pending.policy.mode === 'paragraph') {
-      if (
-        this.settings.lightRagImageDownloadsDisabledFor !== pending.backendId
-      ) {
-        return this.pauseOperation(
-          operationPath,
-          record,
-          pending,
-          'Paragraph privacy acknowledgement changed before upload.',
-        )
-      }
       const compatibility = await this.getParagraphCompatibility()
       if (compatibility.status !== 'supported') {
         return this.pauseOperation(
@@ -1948,17 +1934,6 @@ export class RAGEngine {
             path: operationPath,
             message:
               'Native paragraph processing supports Markdown and DOCX only.',
-          }
-        }
-        if (
-          !backendId ||
-          this.settings.lightRagImageDownloadsDisabledFor !== backendId
-        ) {
-          return {
-            status: 'paused',
-            path: operationPath,
-            message:
-              'Confirm that native Markdown image downloading is disabled for this backend.',
           }
         }
         const compatibility = await this.getParagraphCompatibility()

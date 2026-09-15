@@ -123,7 +123,6 @@ function makeEngine(options?: {
     lightRagServerUrl: 'http://localhost:9621',
     lightRagBackendIdentity: 'backend-a',
     lightRagVaultNamespace: 'vault-a',
-    lightRagImageDownloadsDisabledFor: 'backend-a',
     lightRagChunkingStrategy: 'paragraph',
     lightRagChunkSize: 1200,
     lightRagChunkOverlap: 100,
@@ -368,18 +367,6 @@ describe('RAGEngine native paragraph transport', () => {
       engine.ingestFile(note, { intent: 'new', policy: legacyPolicy }),
     ).resolves.toMatchObject({ status: 'processed', docId: 'doc-legacy' })
     expect(records[note.path].policy).toEqual(legacyPolicy)
-  })
-
-  it('blocks paragraph uploads unless backend version, native support, and privacy acknowledgement all match', async () => {
-    const note = file()
-    const { engine } = makeEngine({
-      settings: { lightRagImageDownloadsDisabledFor: 'old-backend' },
-    })
-
-    await expect(
-      engine.ingestFile(note, { intent: 'new', policy: paragraphPolicy }),
-    ).resolves.toMatchObject({ status: 'paused', path: note.path })
-    expect(requestUrlMock).not.toHaveBeenCalled()
   })
 
   it('blocks the known table-header-losing backend before ingestion', async () => {
