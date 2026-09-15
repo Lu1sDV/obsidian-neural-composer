@@ -239,6 +239,15 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
         })
     }
 
+    new Setting(container).setName('Server status').addButton((button) =>
+      button.setButtonText('Ping').onClick(() => {
+        button.setDisabled(true).setButtonText('Pinging…')
+        void plugin.pingLightRagServer().finally(() => {
+          button.setDisabled(false).setButtonText('Ping')
+        })
+      }),
+    )
+
     const disposeDocumentProcessingSettings = renderDocumentProcessingSettings(
       container,
       plugin,

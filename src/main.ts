@@ -173,6 +173,20 @@ export type EnvEditorSnapshot = {
 
 type EnvFileSource = Omit<EnvEditorSnapshot, 'content'>
 
+type LightRagHealthResult =
+  | { kind: 'healthy'; busy: boolean; version?: string; elapsedMs: number }
+  | { kind: 'http'; status: number }
+  | { kind: 'network' }
+  | { kind: 'timeout' }
+  | { kind: 'invalid' }
+  | { kind: 'stale' }
+
+type PendingLightRagHealth = {
+  invalidate: () => void
+  promise: Promise<LightRagHealthResult>
+  timeoutId: number
+}
+
 type NodeReadableStreamLike = {
   on(
     event: 'data',
@@ -252,6 +266,7 @@ export default class NeuralComposerPlugin extends Plugin {
   private ragEngineInitPromise: Promise<RAGEngine> | null = null
 
   private timeoutIds: number[] = []
+  private pendingLightRagHealth: PendingLightRagHealth | null = null
   private modifyDebounceMap: Map<string, number> = new Map()
   private serverProcess: NodeChildProcessLike | null = null
   private lastErrorTime: number = 0
@@ -335,6 +350,19 @@ export default class NeuralComposerPlugin extends Plugin {
       headers['X-API-Key'] = this.settings.lightRagApiKey
     }
     return headers
+  }
+
+  private getSafeLightRagEndpoint(): string {
+    try {
+      const endpoint = new URL(this.settings.lightRagServerUrl)
+      endpoint.username = ''
+      endpoint.password = ''
+      endpoint.search = ''
+      endpoint.hash = ''
+      return endpoint.toString().replace(/\/$/, '')
+    } catch {
+      return 'the configured endpoint'
+    }
   }
 
   async onload() {
@@ -462,6 +490,14 @@ export default class NeuralComposerPlugin extends Plugin {
           return
         }
         this.restartLightRagServer()
+      },
+    })
+
+    this.addCommand({
+      id: 'ping-lightrag-server',
+      name: 'Ping LightRAG server',
+      callback: () => {
+        void this.pingLightRagServer()
       },
     })
 
@@ -1033,6 +1069,7 @@ export default class NeuralComposerPlugin extends Plugin {
 
   onunload() {
     this.graphDisposed = true
+    this.invalidateLightRagHealthRequest()
     this.graphBatchAbort?.abort()
     this.deferredGraphChanges.clear()
     this.modelCatalog?.dispose()
@@ -1919,6 +1956,7 @@ export default class NeuralComposerPlugin extends Plugin {
       this.modifyDebounceMap.clear()
     }
     await this.saveData(newSettings)
+    if (ownershipChanged) this.invalidateLightRagHealthRequest()
     if (newSettings.lightRagUseRemote && !this.settings.lightRagUseRemote)
       this.stopLightRagServer()
     this.settings = newSettings
@@ -2604,46 +2642,150 @@ export default class NeuralComposerPlugin extends Plugin {
     void this.checkAndUpdateStatus()
   }
 
-  private async checkAndUpdateStatus() {
-    // Si el proceso no existe y no está el auto-start, está offline
-    if (
-      !this.isRemoteServer() &&
-      !this.settings.enableAutoStartServer &&
-      !this.serverProcess
-    ) {
-      this.updateStatusUI('offline')
-      return
-    }
+  private invalidateLightRagHealthRequest(): void {
+    const pending = this.pendingLightRagHealth
+    if (!pending) return
+    this.pendingLightRagHealth = null
+    window.clearTimeout(pending.timeoutId)
+    pending.invalidate()
+  }
 
-    try {
-      const response = await requestUrl({
-        url: `${this.settings.lightRagServerUrl}/health`,
-        method: 'GET',
-        headers: this.getLightRagHeaders(),
-        throw: false,
+  private async checkLightRagHealth(): Promise<LightRagHealthResult> {
+    if (this.graphDisposed) return { kind: 'stale' }
+    if (this.pendingLightRagHealth) return this.pendingLightRagHealth.promise
+
+    const startedAt = Date.now()
+    const backendIdentity = this.settings.lightRagBackendIdentity
+    let timeoutId = 0
+    let invalidate!: () => void
+    const stale = new Promise<LightRagHealthResult>((resolve) => {
+      invalidate = () => resolve({ kind: 'stale' })
+    })
+    const request = requestUrl({
+      url: `${this.settings.lightRagServerUrl.replace(/\/+$/, '')}/health`,
+      method: 'GET',
+      headers: this.getLightRagHeaders(),
+      throw: false,
+    })
+      .then((response): LightRagHealthResult => {
+        if (response.status !== 200)
+          return { kind: 'http', status: response.status }
+
+        let data: unknown
+        try {
+          data = response.json
+        } catch {
+          return { kind: 'invalid' }
+        }
+        if (typeof data !== 'object' || data === null)
+          return { kind: 'invalid' }
+
+        const health = data as Record<string, unknown>
+        if (
+          health.status !== 'healthy' ||
+          (health.pipeline_busy !== undefined &&
+            typeof health.pipeline_busy !== 'boolean')
+        )
+          return { kind: 'invalid' }
+
+        const version =
+          typeof health.core_version === 'string' && health.core_version
+            ? health.core_version
+            : typeof health.api_version === 'string' && health.api_version
+              ? health.api_version
+              : undefined
+        return {
+          kind: 'healthy',
+          busy: health.pipeline_busy === true,
+          ...(version ? { version } : {}),
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+        }
       })
+      .catch((): LightRagHealthResult => ({ kind: 'network' }))
+    const timeout = new Promise<LightRagHealthResult>((resolve) => {
+      timeoutId = window.setTimeout(() => resolve({ kind: 'timeout' }), 5000)
+    })
+    const healthResult = Promise.race([request, timeout, stale]).then(
+      (result): LightRagHealthResult => {
+        if (
+          this.graphDisposed ||
+          backendIdentity !== this.settings.lightRagBackendIdentity
+        )
+          return { kind: 'stale' }
+        return result
+      },
+    )
+    const pending = { invalidate, promise: healthResult, timeoutId }
+    pending.promise = healthResult.finally(() => {
+      window.clearTimeout(timeoutId)
+      if (this.pendingLightRagHealth === pending)
+        this.pendingLightRagHealth = null
+    })
+    this.pendingLightRagHealth = pending
+    return pending.promise
+  }
 
-      if (response.status === 200) {
-        const data = response.json as {
-          pipeline_busy?: boolean
-          core_version?: string
-          api_version?: string
-        }
-        const isBusy = data?.pipeline_busy ?? false
-        // Store the server version (core_version is canonical; api_version as fallback)
-        this.setServerVersion(data?.core_version ?? data?.api_version ?? null)
-        this.updateStatusUI(isBusy ? 'busy' : 'online')
-        if (!this.ingestedFolderPathsLoaded) {
-          void this.refreshIngestedFolderPaths()
-        }
-      } else {
-        this.setServerVersion(null)
-        this.updateStatusUI('offline')
+  private async checkAndUpdateStatus(): Promise<LightRagHealthResult> {
+    const result = await this.checkLightRagHealth()
+    if (result.kind === 'stale') return result
+
+    if (result.kind === 'healthy') {
+      this.setServerVersion(result.version ?? null)
+      this.updateStatusUI(result.busy ? 'busy' : 'online')
+      if (!this.ingestedFolderPathsLoaded) {
+        void this.refreshIngestedFolderPaths()
       }
-    } catch {
+    } else {
       this.setServerVersion(null)
       this.updateStatusUI('offline')
     }
+    return result
+  }
+
+  public async pingLightRagServer(): Promise<void> {
+    const endpoint = this.getSafeLightRagEndpoint()
+    const notice = new Notice(`Pinging ${BACKEND_NAME} at ${endpoint}…`, 10000)
+    const result = await this.checkAndUpdateStatus()
+
+    if (result.kind === 'stale') {
+      if (this.graphDisposed) {
+        notice.hide()
+      } else {
+        notice.setMessage('LightRAG server connection changed; retry the ping.')
+      }
+      return
+    }
+    if (result.kind === 'healthy') {
+      const version = result.version ? ` v${result.version}` : ''
+      const activity = result.busy ? ' and busy processing documents' : ''
+      notice.setMessage(
+        `${BACKEND_NAME}${version} is healthy${activity} (${result.elapsedMs} ms).`,
+      )
+      return
+    }
+    if (result.kind === 'http') {
+      const authentication =
+        result.status === 401 || result.status === 403
+          ? ' Check the configured API key and server authentication.'
+          : ''
+      notice.setMessage(
+        `${BACKEND_NAME} at ${endpoint} refused the health check (HTTP ${result.status}).${authentication}`,
+      )
+      return
+    }
+    if (result.kind === 'timeout') {
+      notice.setMessage(
+        `${BACKEND_NAME} at ${endpoint} did not respond within 5 seconds.`,
+      )
+      return
+    }
+    if (result.kind === 'invalid') {
+      notice.setMessage(
+        `${BACKEND_NAME} at ${endpoint} returned an invalid health response.`,
+      )
+      return
+    }
+    notice.setMessage(`Could not reach ${BACKEND_NAME} at ${endpoint}.`)
   }
 
   private updateStatusUI(status: 'online' | 'offline' | 'busy') {

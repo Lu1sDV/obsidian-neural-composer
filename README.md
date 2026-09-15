@@ -93,6 +93,8 @@ Open **Settings → Neural Composer**. The panel has a sidebar with seven tabs:
 
 A green dot in the status bar confirms the server is running. Right-click any folder in your vault to ingest notes and start chatting.
 
+Run **Neural Composer: Ping LightRAG server** from the command palette to check the configured server without starting or restarting it. The result reports health, processing activity, optional server version, and response time, or explains authentication, connection, invalid-response, and five-second timeout failures. This works with local and remote servers, including remote servers on mobile. A successful ping checks the health endpoint—not LLM, embedding, or document-mapping readiness.
+
 Model discovery runs after saving credentials and when opening a model picker with a missing or expired catalog (24 hours). There is no background polling. Newly discovered models are added to the Models list with provider-qualified IDs; existing and removed models are never changed or deleted automatically. Manual model entry remains available. Z.ai uses the general API endpoint, not the Coding Plan endpoint.
 
 An authenticated model-list request returning HTTP 404 disables discovery for that provider endpoint, including after restart or key changes. **Refresh** respects this saved state. Use **Reset model discovery** or change the endpoint to try again. Authentication and temporary network failures do not mark an endpoint unsupported.
