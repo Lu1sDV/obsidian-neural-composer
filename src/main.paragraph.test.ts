@@ -35,7 +35,6 @@ jest.mock('./views/NativeGraphView', () => ({}))
 type ProcessingSettings = NeuralComposerSettings & {
   lightRagVaultNamespace: string
   lightRagBackendIdentity: string
-  lightRagImageDownloadsDisabledFor: string
 }
 
 type GraphChange = {
@@ -192,7 +191,6 @@ function createPlugin() {
     lightRagUseRemote: true,
     lightRagVaultNamespace: 'shared-vault',
     lightRagBackendIdentity: 'original-backend',
-    lightRagImageDownloadsDisabledFor: 'original-backend',
   }
   const saveData = jest
     .fn<Promise<void>, [ProcessingSettings]>()
@@ -502,7 +500,7 @@ it('ignores stale close and error events from an older owned server process', as
 })
 
 describe('Paragraph processing connection identity', () => {
-  it('does not carry local ownership or privacy acknowledgement into forced mobile remote mode', async () => {
+  it('does not carry local ownership into forced mobile remote mode', async () => {
     jest.replaceProperty(Platform, 'isDesktop', false)
     try {
       const { plugin, settings } = createPlugin()
@@ -514,29 +512,26 @@ describe('Paragraph processing connection identity', () => {
       expect(plugin.settings.lightRagBackendIdentity).not.toBe(
         'original-backend',
       )
-      expect(plugin.settings.lightRagImageDownloadsDisabledFor).toBe('')
       expect(plugin.settings.lightRagVaultNamespace).toBe('shared-vault')
     } finally {
       jest.restoreAllMocks()
     }
   })
 
-  it('invalidates privacy confirmation when connection credentials change without changing the shared vault namespace', async () => {
+  it('rotates backend identity when connection credentials change without changing the shared vault namespace', async () => {
     const { plugin, settings, saveData } = createPlugin()
     await plugin.setSettings({ ...settings, lightRagApiKey: 'synthetic-key' })
     const persisted = saveData.mock.calls[0][0]
     expect(persisted.lightRagBackendIdentity).not.toBe('original-backend')
     expect(persisted.lightRagBackendIdentity).toMatch(/^[0-9a-f-]{36}$/)
-    expect(persisted.lightRagImageDownloadsDisabledFor).toBe('')
     expect(persisted.lightRagVaultNamespace).toBe('shared-vault')
   })
 
-  it('retains backend ownership and privacy confirmation when only future chunk settings change', async () => {
+  it('retains backend ownership when only future chunk settings change', async () => {
     const { plugin, settings, saveData } = createPlugin()
     await plugin.setSettings({ ...settings, lightRagChunkSize: 1800 })
     const persisted = saveData.mock.calls[0][0]
     expect(persisted.lightRagBackendIdentity).toBe('original-backend')
-    expect(persisted.lightRagImageDownloadsDisabledFor).toBe('original-backend')
     expect(persisted.lightRagChunkSize).toBe(1800)
   })
 
@@ -558,37 +553,6 @@ describe('Paragraph processing connection identity', () => {
       first.lightRagVaultNamespace,
     )
   })
-})
-
-it('keeps the original server configuration when staged privacy configuration cannot be verified', async () => {
-  const { plugin, settings } = createPlugin()
-  const original = 'CUSTOM_LIMIT=42\nNATIVE_MD_IMAGE_DOWNLOAD_ENABLED=true\n'
-  const files = new Map([['/synthetic/.env', original]])
-  const restart = jest.fn()
-  Object.assign(plugin, {
-    settings: {
-      ...settings,
-      lightRagUseRemote: false,
-      lightRagWorkDir: '/synthetic',
-    },
-    restartLightRagServer: restart,
-    _nodePath: { join: (...parts: string[]) => parts.join('/') },
-    _nodeFs: {
-      existsSync: (path: string) => files.has(path),
-      readFileSync: (path: string) => files.get(path),
-      writeFileSync: (path: string) => files.set(path, 'incomplete write'),
-      renameSync: jest.fn(),
-      unlinkSync: jest.fn(),
-    },
-  })
-  await expect(plugin.configureParagraphPrivacy()).rejects.toThrow(
-    'original file was kept',
-  )
-  expect(files.get('/synthetic/.env')).toBe(original)
-  expect(restart).not.toHaveBeenCalled()
-  expect(
-    (plugin.settings as ProcessingSettings).lightRagImageDownloadsDisabledFor,
-  ).toBe('')
 })
 
 it('retains the explicit environment when starting without regeneration', async () => {
@@ -616,6 +580,49 @@ it('retains the explicit environment when starting without regeneration', async 
   await plugin.startLightRagServer(true)
 
   expect(files.get('/synthetic/.env')).toBe(original)
+})
+
+it('disables native Markdown image downloads in generated configuration', () => {
+  const { plugin, settings } = createPlugin()
+  const { files, fs } = createMemoryFs('')
+  Object.assign(plugin, {
+    settings: {
+      ...settings,
+      lightRagUseRemote: false,
+      lightRagWorkDir: '/synthetic',
+      lightRagCustomEnv: '',
+    },
+    _nodeFs: fs,
+    _nodePath: { join: (...parts: string[]) => parts.join('/') },
+  })
+
+  expect(plugin.updateEnvFile()).toBe(true)
+  expect(
+    lastEnvValue(
+      files.get('/synthetic/.env') ?? '',
+      'NATIVE_MD_IMAGE_DOWNLOAD_ENABLED',
+    ),
+  ).toBe('false')
+})
+
+it('pins image downloads off even when a custom override tries to enable them', () => {
+  const { plugin, settings } = createPlugin()
+  const { files, fs } = createMemoryFs('')
+  Object.assign(plugin, {
+    settings: {
+      ...settings,
+      lightRagUseRemote: false,
+      lightRagWorkDir: '/synthetic',
+      lightRagCustomEnv: 'NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=true\n',
+    },
+    _nodeFs: fs,
+    _nodePath: { join: (...parts: string[]) => parts.join('/') },
+  })
+
+  expect(plugin.updateEnvFile()).toBe(true)
+  const env = files.get('/synthetic/.env') ?? ''
+  expect(env).toContain('NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=true')
+  expect(lastEnvValue(env, 'NATIVE_MD_IMAGE_DOWNLOAD_ENABLED')).toBe('false')
 })
 
 it('preserves user environment text while normal generation tracks provider changes without growth', async () => {
@@ -688,7 +695,7 @@ it('preserves user environment text while normal generation tracks provider chan
 })
 
 it('previews the merged environment and saves intentional edits without changing other bytes', async () => {
-  const { plugin, settings, saveData } = createPlugin()
+  const { plugin, settings } = createPlugin()
   const original = [
     '# Operador – mantener exactamente',
     'CUSTOM_LIMIT=42',
@@ -698,11 +705,7 @@ it('previews the merged environment and saves intentional edits without changing
     '',
   ].join('\r\n')
   const { files, fs } = createMemoryFs(original)
-  const restart = jest.fn(() => {
-    expect(
-      (plugin.settings as ProcessingSettings).lightRagImageDownloadsDisabledFor,
-    ).toBe('')
-  })
+  const restart = jest.fn()
   const engine = { setSettings: jest.fn() }
   Object.assign(plugin, {
     settings: {
@@ -736,12 +739,6 @@ it('previews the merged environment and saves intentional edits without changing
   await expect(plugin.saveEnvAndRestart(edited, snapshot)).resolves.toBe(true)
 
   expect(files.get('/synthetic/.env')).toBe(edited)
-  expect(saveData).toHaveBeenCalledWith(
-    expect.objectContaining({ lightRagImageDownloadsDisabledFor: '' }),
-  )
-  expect(engine.setSettings).toHaveBeenCalledWith(
-    expect.objectContaining({ lightRagImageDownloadsDisabledFor: '' }),
-  )
   expect(restart).toHaveBeenCalledWith(true)
 })
 
@@ -910,7 +907,6 @@ it('rejects a same-byte snapshot after the selected backend and workdir change',
   plugin.settings = {
     ...plugin.settings,
     lightRagBackendIdentity: 'replacement-backend',
-    lightRagImageDownloadsDisabledFor: 'replacement-backend',
     lightRagWorkDir: '/replacement',
   }
 
@@ -926,48 +922,6 @@ it('rejects a same-byte snapshot after the selected backend and workdir change',
 
   expect(files.get('/synthetic/.env')).toBe(original)
   expect(files.get('/replacement/.env')).toBe(original)
-  expect(fs.writeFileSync).not.toHaveBeenCalled()
-  expect(restart).not.toHaveBeenCalled()
-  expect(
-    (plugin.settings as ProcessingSettings).lightRagImageDownloadsDisabledFor,
-  ).toBe('replacement-backend')
-})
-
-it('rechecks snapshot ownership after asynchronously clearing acknowledgement', async () => {
-  const { plugin, settings } = createPlugin()
-  const original = 'CUSTOM_LIMIT=42\n'
-  const { files, fs } = createMemoryFs(original)
-  const restart = jest.fn()
-  const setSettings = jest.fn(async (next: NeuralComposerSettings) => {
-    expect(next.lightRagImageDownloadsDisabledFor).toBe('')
-    plugin.settings = {
-      ...next,
-      lightRagBackendIdentity: 'replacement-backend',
-      lightRagImageDownloadsDisabledFor: 'replacement-backend',
-      lightRagWorkDir: '/replacement',
-    }
-  })
-  Object.assign(plugin, {
-    settings: {
-      ...settings,
-      lightRagUseRemote: false,
-      lightRagWorkDir: '/synthetic',
-    },
-    generateEnvConfig: jest.fn(() => 'CURRENT_GENERATED=true\n'),
-    restartLightRagServer: restart,
-    setSettings,
-    _nodeFs: fs,
-    _nodePath: { join: (...parts: string[]) => parts.join('/') },
-  })
-  const snapshot = plugin.loadEnvEditorSnapshot()
-  if (!snapshot) throw new Error('Environment snapshot is unavailable')
-
-  await expect(
-    plugin.saveEnvAndRestart(snapshot.content, snapshot),
-  ).resolves.toBe(false)
-
-  expect(setSettings).toHaveBeenCalledTimes(1)
-  expect(files.get('/synthetic/.env')).toBe(original)
   expect(fs.writeFileSync).not.toHaveBeenCalled()
   expect(restart).not.toHaveBeenCalled()
 })

@@ -42,13 +42,12 @@ export function validateDocumentProcessingValues(
 
 type DocumentProcessingSettingsOptions = {
   isDesktop: boolean
-  isRemote: boolean
 }
 
 export function renderDocumentProcessingSettings(
   container: HTMLElement,
   plugin: NeuralComposerPlugin,
-  { isDesktop, isRemote }: DocumentProcessingSettingsOptions,
+  { isDesktop }: DocumentProcessingSettingsOptions,
 ): () => void {
   let disposed = false
   const stackOnMobile = (setting: Setting) => {
@@ -165,7 +164,7 @@ export function renderDocumentProcessingSettings(
       compatibilitySetting.setDesc(
         `${label} — ${compatibility.message}${
           compatibility.status === 'supported'
-            ? ' Privacy confirmation is also required.'
+            ? ''
             : ' Native paragraph ingestion is blocked.'
         }`,
       )
@@ -198,84 +197,10 @@ export function renderDocumentProcessingSettings(
     text: 'Retries keep their captured processing settings. Existing documents with unknown historical settings remain paused during automatic replacement until you explicitly reprocess them with current settings.',
   })
 
-  const privacyDescription = isRemote
-    ? 'On the server host, set NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false and restart LightRAG. The plugin cannot read or modify a remote filesystem, so this remains operator-confirmed rather than verified.'
-    : 'Native Markdown can download external images. Configure the managed local .env explicitly and restart, then confirm the effective running setting below. A generated file is not runtime verification.'
-  const privacySetting = new Setting(container)
-    .setName('External image download prerequisite')
-    .setDesc(privacyDescription)
-
-  if (isDesktop && !isRemote) {
-    privacySetting.addButton((button) =>
-      button.setButtonText('Configure & restart').onClick(() => {
-        button.setDisabled(true)
-        void plugin
-          .configureParagraphPrivacy()
-          .catch((error: unknown) => {
-            new Notice(
-              error instanceof Error
-                ? error.message
-                : 'Could not configure the local privacy prerequisite.',
-            )
-          })
-          .finally(() => {
-            if (!disposed) button.setDisabled(false)
-          })
-      }),
-    )
-  }
-
-  const privacyConfirmed =
-    backendId.length > 0 &&
-    plugin.settings.lightRagImageDownloadsDisabledFor === backendId
-  new Setting(container)
-    .setName('Operator confirmation')
-    .setDesc(
-      privacyConfirmed
-        ? 'Operator-confirmed for this backend identity; the plugin does not claim runtime verification.'
-        : 'Required for native paragraph ingestion and scoped only to the current backend identity.',
-    )
-    .addToggle((toggle) => {
-      toggle.toggleEl.setAttribute('role', 'switch')
-      toggle.toggleEl.setAttribute('aria-label', 'Operator confirmation')
-      toggle.toggleEl.setAttribute('aria-checked', String(privacyConfirmed))
-      toggle.toggleEl
-        .querySelector('input')
-        ?.setAttribute('aria-hidden', 'true')
-      toggle
-        .setValue(privacyConfirmed)
-        .setDisabled(backendId.length === 0)
-        .onChange((confirmed) => {
-          if (
-            !backendId ||
-            backendId !== plugin.settings.lightRagBackendIdentity
-          ) {
-            new Notice('Backend identity changed. Review the setting again.')
-            return
-          }
-          toggle.toggleEl.setAttribute('aria-checked', String(confirmed))
-          void plugin
-            .setSettings({
-              ...plugin.settings,
-              lightRagImageDownloadsDisabledFor: confirmed ? backendId : '',
-            })
-            .catch(() => {
-              if (!disposed) {
-                toggle.setValue(privacyConfirmed)
-                toggle.toggleEl.setAttribute(
-                  'aria-checked',
-                  String(privacyConfirmed),
-                )
-              }
-              new Notice('Could not save privacy confirmation.')
-            })
-        })
-    })
-
   new Setting(container)
     .setName('Backend replaced or reconfigured')
     .setDesc(
-      'Use only when the operator knows the deployment or graph changed behind the same connection. This resets plugin ownership and privacy confirmation; it does not modify backend files or graph data.',
+      'Use only when the operator knows the deployment or graph changed behind the same connection. This resets plugin ownership; it does not modify backend files or graph data.',
     )
     .addButton((button) =>
       button.setButtonText('Reset & revalidate').onClick(() => {
@@ -284,7 +209,7 @@ export function renderDocumentProcessingSettings(
           .invalidateParagraphBackend()
           .then(() => {
             new Notice(
-              'Backend identity reset. Recheck compatibility and confirm privacy before paragraph ingestion.',
+              'Backend identity reset. Recheck compatibility before paragraph ingestion.',
             )
           })
           .catch(() => {

@@ -129,7 +129,6 @@ export const NeuralComposerSettingsSchema = z.object({
   lightRagChunkingStrategy: z.enum(['legacy', 'paragraph']).catch('legacy'),
   lightRagVaultNamespace: z.string().catch(''),
   lightRagBackendIdentity: z.string().catch(''),
-  lightRagImageDownloadsDisabledFor: z.string().catch(''),
 
   // --- INCREMENTAL SYNC ---
   lightRagSyncFolder: z.string().catch(''),
@@ -216,7 +215,6 @@ export const DEFAULT_SETTINGS: NeuralComposerSettings = {
   lightRagChunkingStrategy: 'legacy',
   lightRagVaultNamespace: '',
   lightRagBackendIdentity: '',
-  lightRagImageDownloadsDisabledFor: '',
 
   // DEFAULT NUEVO
   lightRagCustomEnv: '',

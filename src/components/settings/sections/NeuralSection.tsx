@@ -254,7 +254,6 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
       plugin,
       {
         isDesktop: Platform.isDesktop,
-        isRemote: useRemote || !Platform.isDesktop,
       },
     )
 
