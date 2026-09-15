@@ -6,6 +6,7 @@ export type ConfirmModalOptions = {
   title: string
   message: string
   ctaText?: string
+  destructive?: boolean
   onConfirm: () => void
   onCancel?: () => void
 }
@@ -13,6 +14,7 @@ export type ConfirmModalOptions = {
 type ConfirmModalComponentProps = {
   message: string
   ctaText?: string
+  destructive?: boolean
   onConfirm: () => void
   onCancel?: () => void
   onClose: () => void
@@ -26,6 +28,7 @@ export class ConfirmModal extends ReactModal<ConfirmModalComponentProps> {
       props: {
         message: options.message,
         ctaText: options.ctaText,
+        destructive: options.destructive,
         onConfirm: options.onConfirm,
         onCancel: options.onCancel,
       },
@@ -40,6 +43,7 @@ function ConfirmModalComponent({
   message,
   ctaText,
   onConfirm,
+  destructive = false,
   onCancel,
   onClose,
 }: ConfirmModalComponentProps) {
@@ -48,7 +52,7 @@ function ConfirmModalComponent({
       <div style={{ whiteSpace: 'pre-wrap' }}>{message}</div>
       <div className="modal-button-container">
         <button
-          className="mod-warning"
+          className={destructive ? 'mod-destructive' : 'mod-warning'}
           onClick={() => {
             onClose()
             onConfirm()

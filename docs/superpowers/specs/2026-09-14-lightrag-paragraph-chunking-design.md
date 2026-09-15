@@ -2,9 +2,9 @@
 
 Date: 2026-09-14
 
-Status: Approved architecture consolidated for written-specification review. Implementation is not authorized by this document alone.
+Status: Plugin implementation is complete in the `feat/native-paragraph-chunking` feature worktree. Bounded Sol lifecycle/integration closeouts and the final source gates passed: 21 suites/328 tests, production build with TypeScript, zero-warning ESLint across all 21 changed TS/TSX files, and scoped Prettier. Separately, native paragraph ingestion remains blocked in production because no approved upstream LightRAG release has passed the content-preservation gate.
 
-Repository baseline: `07ab696` (`revert: keep LightRAG binary uploads as basenames`). Backend contract baseline: released LightRAG v1.5.7.
+Historical design baseline: `07ab696` (`revert: keep LightRAG binary uploads as basenames`) against released LightRAG v1.5.7. Current implementation baseline: the uncommitted feature worktree described above; no release version is assigned by this specification.
 
 ## 1. Goal and approved decisions
 
@@ -21,7 +21,9 @@ The user approved:
 
 Success means actual parser-backed paragraph chunking, correct Obsidian source resolution, and safe lifecycle behavior across desktop, remote servers, mobile, and plugin reloads. An accepted HTTP request carrying a paragraph selector is not sufficient.
 
-## 2. Evidence and current integration
+## 2. Evidence, historical baseline, and current integration
+
+### 2.1 Upstream contract evidence
 
 LightRAG's paragraph strategy (`P`) consumes parser-generated `.blocks.jsonl`. It uses heading hierarchy, table-row boundaries, paragraph anchors, and hierarchy-aware merging. It can merge small sections and split large ones; it is not one paragraph per chunk. The chunking algorithm does not itself require embedding or LLM calls, although downstream graph extraction and embedding still do. Missing structural blocks cause recursive-character (`R`) fallback. [1][2]
 
@@ -29,20 +31,35 @@ The released text API accepts `chunking.strategy="paragraph_semantic"`, but enqu
 
 The upload endpoint has no separate logical source-path or parser-settings body field. It rejects directory separators in filenames. Document identity and deduplication use canonical basenames, stripping recognized parser hints. Text-source normalization also canonicalizes basenames. A client sending a vault path does not establish that LightRAG preserves it. [1][3]
 
-Current plugin boundaries:
+### 2.2 Historical plugin baseline at approval
 
-| Area | Existing behavior and consequence |
+The following table records the `07ab696` state used to design the feature. It is historical evidence, not a description of the current feature worktree.
+
+| Area | Historical behavior at `07ab696` |
 | --- | --- |
-| `src/core/rag/ragEngine.ts` | `insertDocument()` posts raw text to `/documents/texts`; `uploadDocument()` currently uploads `file.name`, not `file.path`. |
-| `RAGEngine.ingestFile()` | Reads Markdown, prepends the existing `Title:` preamble, and uses the text route. |
-| `src/main.ts` | Current-file and folder ingestion duplicate preparation instead of consistently calling `ingestFile()`. |
-| `RAGEngine.reindexFile()` | Requests deletion and immediately reinserts, ignoring the deletion outcome. |
-| `src/core/rag/docIndexService.ts` | Stores status, document ID and modification time; reconciliation is watched-folder scoped and includes ambiguous basename matching. |
-| `src/views/NativeGraphView.ts` | Uses backend source fields to display and open vault files. |
-| Settings | `lightRagChunkSize` and `lightRagChunkOverlap` default to 1200/100 and feed generated local `.env`; `ragOptions.chunkSize` is a separate legacy setting. |
-| Settings migration | Current schema version is 15; use the existing ordered migration pipeline. |
+| `src/core/rag/ragEngine.ts` | `insertDocument()` posted raw text to `/documents/texts`; `uploadDocument()` uploaded `file.name`, not `file.path`. |
+| `RAGEngine.ingestFile()` | Read Markdown, prepended the existing `Title:` preamble, and used the text route. |
+| `src/main.ts` | Current-file and folder ingestion duplicated preparation instead of consistently calling `ingestFile()`. |
+| `RAGEngine.reindexFile()` | Requested deletion and immediately reinserted, ignoring the deletion outcome. |
+| `src/core/rag/docIndexService.ts` | Stored status, document ID and modification time; reconciliation was watched-folder scoped and included ambiguous basename matching. |
+| `src/views/NativeGraphView.ts` | Used backend source fields to display and open vault files. |
+| Settings | `lightRagChunkSize` and `lightRagChunkOverlap` defaulted to 1200/100 and fed generated local `.env`; `ragOptions.chunkSize` was a separate legacy setting. |
+| Settings migration | The schema version was 15 and used the existing ordered migration pipeline. |
 
 LightRAG deletion is asynchronous. A successful HTTP response may carry `busy` (nothing scheduled) or `deletion_started` (not yet complete). Reprocessing configuration is captured at enqueue time; retrying a failed document does not automatically adopt new settings. [1][3]
+
+### 2.3 Current feature-worktree implementation
+
+The feature worktree supersedes that historical baseline without modifying LightRAG:
+
+| Area | Current implementation |
+| --- | --- |
+| Processing and transport | New settings default to **Existing behavior**. Native Markdown and DOCX preparation uses original bytes, deterministic `nc-<sha256>` source basenames and explicit native-P hints; DOCX disables smart heading. The production compatibility gate blocks every currently known upstream release. |
+| Policy and actions | Settings apply to new documents. Ordinary synchronization pins the last known completed policy; **Reprocess with current settings**, **Retry failed processing**, **Remove from graph**, **Re-add to graph**, and exact legacy mapping are explicit actions. |
+| Lifecycle and recovery | Replacement persists operation intent and proceeds through delete, authoritative absence confirmation, upload, per-document tracking and completion. Pending work is backend-scoped, reload-recoverable and cancellation-aware; accepted remote work is reconciled rather than declared rolled back. |
+| Identity and source resolution | Web Crypto hashes the shared vault namespace and exact vault path. Chat and graph navigation share exact mappings, retain raw graph provenance, and do not guess ambiguous basenames. |
+| Compatibility and privacy | Every measured release (LightRAG 1.5.4 through 1.5.7) is hard-blocked for the pipe-table-header defect and unreleased `main` shares it; 1.5.0 through 1.5.3 lack a native Markdown engine. Unmeasured releases stay Not verified. Native mode also requires backend-scoped operator confirmation that external-image downloading is disabled. |
+| Local/remote ownership | Desktop can configure and restart a managed local server for the image prerequisite. Remote and mobile paths require the operator to configure the server host. Connection changes rotate backend ownership and clear prior confirmation. |
 
 ## 3. Scope and ownership
 
@@ -204,9 +221,9 @@ External clients can still operate on the backend. Respect busy responses and co
 
 ### 8.1 Backend support
 
-Use LightRAG v1.5.7 as the initial tested contract, not an assertion that all v1.5 or future versions are compatible. Establish runtime version and native parser support; missing information stays Not verified. Supported file types help establish parser availability but do not prove a document produced structural blocks. [3][4]
+LightRAG v1.5.7 was the initial historical contract, not an assertion that all v1.5 or future versions are compatible. The preservation corpus was run against every published release and against unreleased upstream `main`. Releases 1.5.0 through 1.5.3 cannot be evaluated at all: their native engine parses only DOCX, so the existing native-file-type check already classifies them Unsupported. Releases 1.5.4, 1.5.5, 1.5.6 and 1.5.7 each reported the same **12 PASS / 1 FAIL**, and unreleased `main` repeated it. No available version can be marked Supported, and version selection cannot clear the gate. [3][4]
 
-Unknown/unsupported servers retain existing behavior; block native paragraph submissions rather than silently downgrading them. Native paragraph acceptance requires runtime evidence in the validation environment, not an undocumented endpoint or a guessed capability flag.
+Unknown or unsupported servers retain existing behavior. Native paragraph submissions are blocked rather than silently downgraded, and there is no production bypass. Runtime evidence must establish native parser support and content preservation before a release can be marked Supported.
 
 Scope capability state and durable operations to the backend connection. Invalidate capability confidence when connection configuration changes. Credentials remain in the existing settings path, not duplicated into operation records. Changes of credentials or backend graph identity require reconciliation; do not treat matching URLs alone as proof of continued ownership. If a deployment cannot report graph identity changes behind an unchanged URL, document this detection limit and require revalidation after operator-reported replacement.
 
@@ -216,17 +233,19 @@ Native Markdown downloads external image URLs by default, even when image analys
 
 Require `NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false` before enabling paragraph ingestion:
 
-- Managed local: offer an explicit configuration action and necessary restart. Preserve unrelated custom environment values. Conflicting overrides prevent claiming the prerequisite is satisfied.
-- Remote: provide operator instructions and require acknowledgement scoped to that connection.
+- Managed local: the explicit **Configure & restart** action writes a verified Neural Composer-managed `.env` block while preserving content outside that block, then requests a restart without another regeneration pass. Ordinary generated updates replace only the managed block. The operator must still confirm the effective running setting.
+- Remote: provide operator instructions and require acknowledgement scoped to that connection; the plugin cannot read or modify the remote filesystem.
 - Without a backend-readable effective value, show **Operator-confirmed**, not **Verified**. A local generated file alone is also not proof of running configuration.
 
-This is an operator-enforced prerequisite where the released API cannot report or control it per request. The plugin must not claim a hard remote enforcement guarantee. Invalidate confirmation when connection configuration changes; require reconfirmation after known backend reconfiguration.
+The managed-local merge preserves unrelated hand-edited content, existing CRLF/LF style, Unicode and multiline values outside the managed markers. Malformed or ambiguous markers, backend/path changes and external file changes stop the write without treating the old content as disposable.
+
+This is an operator-enforced prerequisite where the released API cannot report or control it per request. The plugin must not claim a hard local or remote runtime-enforcement guarantee. Invalidate confirmation when connection configuration changes; require reconfirmation after known backend reconfiguration.
 
 Do not strip image references using ad hoc text rewriting, fetch assets in the plugin, expand links/transclusions, or enable additional analysis modalities. Requests use native paragraph options without `i/t/e` or `!`; ordinary graph extraction remains enabled.
 
 ## 9. Migration and user actions
 
-Add a versioned settings migration from the current version 15, rebasing its version if repository evolution requires it. Preserve provider/model configuration, chunk values and exclusions. Default to existing behavior. Establish and persist the vault namespace before managed submission; devices must use the same namespace for a shared vault.
+The feature worktree adds the ordered settings migration from schema 15 to 16. It preserves provider/model configuration, chunk values and exclusions, defaults processing to existing behavior, and establishes the vault namespace before managed submission. Devices sharing a vault and graph must use the same namespace.
 
 Migrate the existing document-index format conservatively, preserving source records and intentional-removal state. Recover historical policy only when server metadata is sufficient. Otherwise label **Historical processing settings unknown** and require explicit policy adoption before automatic replacement. Existing graph entries remain queryable, but automatic synchronization can pause for these records; explain that consequence.
 
@@ -251,11 +270,82 @@ Use existing modules and installed dependencies. Small helpers are appropriate f
 
 ## 11. Verification and acceptance
 
-### 11.1 Existing evidence
+### 11.1 Evidence recorded to date
 
-Repository tracing and a static AST audit of the released document API and paragraph implementation established the request-field and fallback contracts. A design-level filename calculation produced distinct 123-byte example transport names for same-basename notes in different folders.
+#### Historical contract analysis
 
-No live parser, ingestion backend, private vault, mobile device or retrieval benchmark has been exercised for this design. Static evidence does not establish end-to-end compatibility or retrieval improvements.
+Repository tracing and a static AST audit of the released document API and paragraph implementation established the request-field and fallback contracts. A design-level filename calculation produced distinct 123-byte example transport names for same-basename notes in different folders. That historical static evidence did not establish end-to-end compatibility or retrieval improvement.
+
+#### Reproducible upstream preservation gate
+
+Run the parser-only corpus with the Python interpreter from the installed backend environment:
+
+```bash
+/path/to/lightrag-venv/bin/python scripts/verify-paragraph-backend.py
+```
+
+The script uses a temporary synthetic corpus and makes no server, vault, LLM or embedding calls. Against unmodified LightRAG 1.5.7 it reported **12 PASS and 1 FAIL**. Native parsing, heading-aware output, token cap, frontmatter, fenced-code pseudo-headings, literal wikilinks/transclusions, table rows, HTML tables, oversized-section retention, blank-note handling, absence of image sidecar artifacts and unchanged source all passed. **Markdown pipe-table headers retained in chunk text** failed. The script exits nonzero on this defect, so v1.5.7 remains hard-blocked in production.
+
+Every candidate was installed into its own isolated virtual environment together with the parser dependencies a `lightrag-server` deployment installs (`python-docx`, `defusedxml`, `langchain-text-splitters`):
+
+| Candidate | Result |
+| --- | --- |
+| 1.5.0, 1.5.1, 1.5.2, 1.5.3 | Native engine supports only DOCX: `error: engine 'native' does not support .md files (supported: docx)`. Not evaluable, and already Unsupported by the advertised-file-type check. |
+| 1.5.4, 1.5.5, 1.5.6, 1.5.7 | 12 PASS / 1 FAIL, identical failure set. |
+| `main` (unreleased HEAD) | 12 PASS / 1 FAIL, identical failure set. |
+
+The defect sits upstream of chunking and is unchanged on `main`. For a Markdown pipe table the native parser relocates the header row into the table sidecar and omits it from the block content the chunker consumes. For the two-row corpus table the sidecar records `table_header: [["component_header_contract", "limit_header_contract"]]` and `dimension: [2, 2]`, while the block content and every resulting chunk carry only `<table format="json">[["Widget", "10"], ["Sensor", "20"]]</table>`. HTML tables keep their `<th>` cells inline in the same block, which is why that check passes. A chunker cannot recover a header that never reaches it, so no plugin-side change can satisfy this contract without modifying the backend or reimplementing the parser.
+
+#### Real integration evidence
+
+The following observations came from a disposable Obsidian 1.13.7 vault and an unmodified LightRAG 1.5.7 backend. Native lifecycle experiments used an in-memory compatibility override in the disposable renderer only; no source or persisted configuration bypass was added, and the default gate was separately observed to pause without creating a new record.
+
+- Real graph extraction and answers used Z.ai `glm-5.3-flash` through the Coding Plan API with low reasoning. Real embeddings used local `jina-v5-nano-retrieval:q8` at 768 dimensions. No synthetic completion was substituted.
+- Native Markdown and DOCX reached the native parser with `paragraph_semantic` and the requested size, overlap and `drop_references=false`; DOCX produced three chunks at 160/20 with `smart_heading=false`.
+- A real query answered Alpha=blue and Beta=red with the two folder-specific sources mapped correctly. A graph-source click opened the root `Overview.md` from its raw hashed source while ambiguous `Overview.md` basename resolution correctly returned no match.
+- An ordinary edit retained 160/20 after the selected controls changed to 220/20. Current-file ingestion did not migrate the registered document; explicit confirmed reprocessing did. A mapped legacy document recovered exact 1200/100 metadata, while an unknown historical policy paused synchronization.
+- Folder ingestion processed supported Markdown and skipped an unsupported text file in paragraph mode. A loopback collector observed zero external-image requests, one external image was reported dropped, and literal wikilinks/transclusion remained unchanged; the plugin discovered or uploaded no attachments.
+- Cancellation at persisted `delete_confirmed` left the deleted server document absent and another document unchanged. Reload then resumed the captured legacy 900/90 policy and completed with real model processing. A later real folder rename plus edit retained the original 900/90 policy, retired the old record, processed the new hashed source and kept the old source as an alias.
+- Desktop settings, settings popout and reload were exercised. The mobile surface was tested only through 430x932 emulation: it stayed remote-only, loaded no Node modules, exposed labeled controls, rejected zero chunk size and had no horizontal overflow. No physical mobile device was tested.
+
+These observations demonstrate parser transport, lifecycle behavior and source resolution on the exercised corpus. They do **not** demonstrate a general retrieval-quality improvement.
+
+#### Corrective implementation closeout evidence
+
+The completed source corrections received bounded PASS verdicts from both Sol lifecycle and integration closeout reviews. Focused real evidence added after the earlier observations includes:
+
+- Expired-track recovery completed in 60.537 seconds with the captured legacy 800/80 policy and exact document/source identity even though server metadata omitted `source_file`; it did not replay the upload.
+- Corrected rename-plus-modify, folder removal, folder exclusion and startup recovery of a pending-less removal all completed against the real backend. The sequence made four GLM-backed uploads total and no additional upload after either recovery.
+- A real 17-node graph remained visible past an older render's deadline, stopped at its own deadline, and cancelled a stale zero-width deferred render; the final surface was visually confirmed.
+- Native-provider fallback aliases were empty where required. Re-including an excluded path reported that removed documents stay removed, and the removed document did not resurrect.
+- Real filesystem and UI review of the managed `.env` merge preserved CRLF, Unicode and multiline content and cleared both persisted and engine-visible operator acknowledgement. The final stale-snapshot check refused the save, made no restart call or temporary files, preserved the externally changed bytes and kept the modal open; reopening from fresh bytes saved successfully, requested one restart with regeneration skipped, and closed the modal. The restart callback was guarded/stubbed for safety, so this evidence does not claim that an actual managed server process restarted.
+- Final unload exposed and corrected an unsafe existing port/name-based shutdown fallback. The real remote backend survived plugin unload after the fix. A separate, non-LLM Python parent/child fixture launched through the plugin received its own POSIX process group; shutdown terminated both owned processes and their listener while leaving the independent LightRAG backend healthy. Windows PID-tree targeting and stale-child callbacks received focused regression coverage; no Windows runtime was exercised.
+
+#### Controlled diagnostic comparison
+
+Main completed one fixed-order run over four synthetic Markdown documents and four queries. Both isolated LightRAG 1.5.7 backends used real Z.ai `glm-5.3-flash`, real local `jina-v5-nano-retrieval:q8` embeddings at 768 dimensions, chunk size 160 and overlap 20. Legacy used its real Title-preamble text route; paragraph used original Markdown bytes through native P. The comparison was independently reviewed against the result, usage, chunk and document-status artifacts.
+
+| Measured result | Existing behavior | Native paragraph |
+| --- | ---: | ---: |
+| Persisted chunks | 9 | 10 |
+| Persisted chunk token-counter sum | 969 | 969 |
+| Sequential ingestion wall-time total | 161.542 s | 160.041 s |
+| Query wall-time total | 20.260 s | 30.566 s |
+| Proxy-observed ingestion LLM tokens | 54,281 | 57,830 |
+| Proxy-observed query LLM tokens | 11,921 | 12,477 |
+| Requested facts answered (Sol assessment) | 4/4 | 3/4 |
+| Clean structured citations | 3/4 | 3/4 |
+| Expected source retrieved | 4/4 | 4/4 |
+
+All eight expected sources were retrieved. Both modes answered three requested facts correctly. Existing behavior also answered the pipe-table question correctly; native paragraph retrieved the table document but could not determine the Access-versus-Decoy relationship because v1.5.7 had removed the header labels. This was the only genuine unanswered native query and directly confirms the production blocker.
+
+Raw substring checks are not semantic-quality scores: they rejected accurate answers that mentioned distractors only in a correct negated contrast and could accept a fact string inside an uncertain answer. Sol's semantic assessment is 4/4 versus 3/4, not the raw scripted score; this is model-assisted review, not human grading. Structured citation cleanliness was 3/4 for each mode.
+
+These measurements are diagnostic, not a benchmark. The run was unreplicated and non-counterbalanced; mode order was fixed, the real transport inputs differed, and upstream cached-prompt usage was asymmetric. The native query total was dominated by the table response (15.113 s versus 5.027 s), whose longer reasoning/refusal accounts for most of the aggregate gap. The proxy observed chat-completion token counters only, not embedding usage or other backend work. Z.ai Coding Plan responses exposed no currency billing, so monetary cost is unknown. The run demonstrates no general quality, speed, token-cost or monetary-cost benefit for either mode and cannot authorize production use.
+
+#### Evidence limitations
+
+The final source gates passed with no remaining source defect found. The final rerun of the permanent Python preservation corpus again produced 12 passes and the pipe-table-header failure on unmodified LightRAG 1.5.7, exiting with code 1 and preserving the release block. Environment-helper/UI evidence used the real filesystem but a guarded/stubbed restart, not an actual managed-process restart. Physical mobile hardware was not exercised.
 
 ### 11.2 Implementation acceptance gates
 
@@ -274,23 +364,23 @@ No live parser, ingestion backend, private vault, mobile device or retrieval ben
 13. External-image downloading is disabled in the disposable backend. The plugin performs no attachment discovery/upload or extra network requests for links.
 14. Real Obsidian checks cover settings, current-file/folder ingestion, modification, rename, removal, source navigation and unload/reload. Exercise a remote-only path and mobile surface; report unavailable real-device verification explicitly.
 
-Use existing Jest conventions and TDD for implementation, with focused regressions for the failure transitions and identity boundaries above. Tests must defend observable behavior, not implementation wiring. Run type checking/build and scoped formatting/linting after integration. No application suite is required merely to review this documentation.
+The final source gates passed 21/21 suites and 328/328 tests, the production build including TypeScript, zero-warning ESLint over all 21 changed TS/TSX files, and scoped Prettier. The final commands used an isolated synthetic environment. Tests continue to defend observable behavior rather than implementation wiring.
 
-Compare current and P processing on the same synthetic corpus and queries: heading-specific retrieval, neighboring-section confusion, table lookups and oversized prose. Record citation correctness, chunk distribution, latency and ingestion cost. Do not promise a retrieval-quality improvement without measurements.
+The controlled Existing-behavior-versus-P comparison above records citation correctness, chunk distribution, latency and proxy-observed LLM token use on its fixed corpus. Its limits remain part of the evidence: do not generalize retrieval quality, speed or cost from one fixed-order run.
 
-## 12. Delivery sequence and review gate
+## 12. Implemented sequence and current review gate
 
-Implement in dependency order after written-spec review and implementation-plan approval:
+Implementation and evidence work followed the approved dependency order:
 
 1. Source identity and durable records, including recovery-safe migrations.
 2. Native parser-backed ingestion and exact source translation.
 3. Shared deletion/replacement lifecycle and caller cutover.
 4. Settings, explicit migration actions and privacy/compatibility gating.
-5. End-to-end Obsidian and backend verification, focused regressions, user documentation and removal of throwaway verification artifacts.
+5. End-to-end Obsidian/backend evidence, focused regressions, user documentation and the final preservation-corpus rerun.
 
-These are acceptance stages of one feature, not permission to ship an incomplete lifecycle or a settings-only toggle. A runtime contract contradiction discovered during implementation must be brought back for a design decision, not concealed through a fallback.
+These remain review layers of one feature, not permission to ship an incomplete lifecycle or a settings-only toggle. A runtime contract contradiction must be recorded and gated rather than concealed through a fallback.
 
-Next gate: user reviews this written specification. Only after approval should implementation planning begin. No feature code is included in this document change.
+Current gate: the plugin implementation, bounded lifecycle/integration closeouts and final source gates are complete. The independent backend release gate is separate: production native paragraph ingestion stays blocked until an upstream release passes the reproducible preservation corpus. LightRAG 1.5.7 remains Unsupported, every other version remains Not verified, and comparative evidence cannot override that block.
 
 ## References
 

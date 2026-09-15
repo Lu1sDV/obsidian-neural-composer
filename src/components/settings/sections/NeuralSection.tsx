@@ -10,6 +10,8 @@ import { useEffect, useRef, useState } from 'react'
 
 import NeuralComposerPlugin from '../../../main'
 
+import { renderDocumentProcessingSettings } from './DocumentProcessingSettings'
+
 class FolderSuggest extends AbstractInputSuggest<TFolder> {
   private readonly input: HTMLInputElement
 
@@ -236,6 +238,15 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
           })
         })
     }
+
+    const disposeDocumentProcessingSettings = renderDocumentProcessingSettings(
+      container,
+      plugin,
+      {
+        isDesktop: Platform.isDesktop,
+        isRemote: useRemote || !Platform.isDesktop,
+      },
+    )
 
     // Graph Logic Model, Embedding Model, Summary Language, Ontology, and
     // Reranking are all written to the local server's .env by updateEnvFile().
@@ -675,6 +686,8 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
           })
         })
       })
+
+    return disposeDocumentProcessingSettings
   }, [settings, currentRerankBinding, useCustomOntology, useRemote, plugin])
 
   // Reactively update the version badge on every server info change

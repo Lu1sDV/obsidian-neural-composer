@@ -8,6 +8,7 @@ import {
   Modal,
   Notice,
   Platform,
+  TFile,
   TextComponent,
   WorkspaceLeaf,
   requestUrl,
@@ -150,9 +151,21 @@ type ForceGraph3DGetter = {
   graphData(): { nodes: GraphNode[]; links: GraphLink[] }
 }
 
+type GraphOwnership = {
+  backendIdentity: string
+  serverUrl: string
+  apiKey: string
+}
+
+type GraphViewScope = {
+  backendIdentity: string
+  serverUrl: string
+  workDir: string
+  useRemote: boolean
+}
+
 export class NativeGraphView extends ItemView {
   private plugin: NeuralComposerPlugin
-  private workDir: string
 
   // Node.js modules for loadReferenceMaps (desktop-only) are reused from the
   // plugin (this.plugin._nodeFs / _nodePath) rather than imported here, so the
@@ -174,6 +187,12 @@ export class NativeGraphView extends ItemView {
   private graph: Graph | null = null
   private chunkToDocMap: Record<string, ChunkDocMap> = {}
   private docToNameMap: Record<string, DocNameMap> = {}
+  private referenceMapServerUrl: string | null = null
+  private referenceMapWorkDir: string | null = null
+  private referenceMapBackendIdentity: string | null = null
+  private renderGeneration = 0
+  private settingsChangeUnsubscribe: (() => void) | null = null
+  private observedGraphScope: GraphViewScope | null = null
 
   private detailsPanel: HTMLElement | null = null
   private sidebarListEl: HTMLElement | null = null
@@ -188,7 +207,6 @@ export class NativeGraphView extends ItemView {
   constructor(leaf: WorkspaceLeaf, plugin: NeuralComposerPlugin) {
     super(leaf)
     this.plugin = plugin
-    this.workDir = plugin.settings.lightRagWorkDir
   }
 
   getViewType() {
@@ -204,17 +222,28 @@ export class NativeGraphView extends ItemView {
   async onOpen() {
     await super.onOpen()
 
+    this.settingsChangeUnsubscribe?.()
+    this.observedGraphScope = this.captureGraphViewScope()
+    this.settingsChangeUnsubscribe = this.plugin.addSettingsChangeListener(
+      () => {
+        const previousScope = this.observedGraphScope
+        const nextScope = this.captureGraphViewScope()
+        this.observedGraphScope = nextScope
+        if (
+          previousScope &&
+          !this.graphViewScopesMatch(previousScope, nextScope)
+        ) {
+          this.invalidateOpenGraph()
+        }
+      },
+    )
+
     const container = this.contentEl
     container.empty()
 
     // Graph data is served over HTTP by LightRAG, so the view works on mobile
-    // when remote-server mode is configured. The only desktop-only piece is
-    // loadReferenceMaps (reads local kv_store_*.json files from the work dir
-    // for citation-source filenames). On mobile we skip that — the graph still
-    // renders, just without filename resolution in the side panel.
-    if (Platform.isDesktop) {
-      this.workDir = this.plugin.settings.lightRagWorkDir
-    }
+    // and with remote servers. Local reference maps are an optional fallback
+    // only for the active desktop-local backend.
 
     container.addClass('nrlcmp-graph-view')
 
@@ -301,28 +330,125 @@ export class NativeGraphView extends ItemView {
 
   // Fix: Removed async (no await). Returns Promise to match interface.
   onClose(): Promise<void> {
+    this.settingsChangeUnsubscribe?.()
+    this.settingsChangeUnsubscribe = null
+    this.observedGraphScope = null
     this.cleanup()
     return Promise.resolve()
   }
 
+  private captureGraphOwnership(): GraphOwnership {
+    return {
+      backendIdentity: this.plugin.settings.lightRagBackendIdentity,
+      serverUrl: this.plugin.settings.lightRagServerUrl,
+      apiKey: this.plugin.settings.lightRagApiKey,
+    }
+  }
+
+  private graphOwnershipIsCurrent(ownership: GraphOwnership): boolean {
+    return (
+      ownership.backendIdentity ===
+        this.plugin.settings.lightRagBackendIdentity &&
+      ownership.serverUrl === this.plugin.settings.lightRagServerUrl &&
+      ownership.apiKey === this.plugin.settings.lightRagApiKey
+    )
+  }
+
+  private captureGraphViewScope(): GraphViewScope {
+    return {
+      backendIdentity: this.plugin.settings.lightRagBackendIdentity,
+      serverUrl: this.plugin.settings.lightRagServerUrl,
+      workDir: this.plugin.settings.lightRagWorkDir,
+      useRemote: this.plugin.settings.lightRagUseRemote,
+    }
+  }
+
+  private graphViewScopesMatch(
+    left: GraphViewScope,
+    right: GraphViewScope,
+  ): boolean {
+    return (
+      left.backendIdentity === right.backendIdentity &&
+      left.serverUrl === right.serverUrl &&
+      left.workDir === right.workDir &&
+      left.useRemote === right.useRemote
+    )
+  }
+
+  private renderIsCurrent(
+    generation: number,
+    ownership: GraphOwnership,
+  ): boolean {
+    return (
+      generation === this.renderGeneration &&
+      this.graphOwnershipIsCurrent(ownership)
+    )
+  }
+
+  private invalidateOpenGraph() {
+    this.renderGeneration += 1
+    this.cleanupRenderers()
+    this.clearReferenceMaps()
+    this.graph = null
+    this.allNodes = []
+    this.filteredNodes = []
+    this.selectedNodes.clear()
+    this.pendingDetailNode = null
+    this.sidebarListEl?.empty()
+    this.detailsPanel?.empty()
+    this.detailsPanel?.removeClass('nrlcmp-visible')
+    this.updateStatsLabel(0, 0)
+
+    if (this.graphContainer) {
+      this.graphContainer.empty()
+      void this.render(this.graphContainer)
+    }
+  }
+
   // --- DATA LOGIC ---
+  private clearReferenceMaps() {
+    this.chunkToDocMap = {}
+    this.docToNameMap = {}
+    this.referenceMapBackendIdentity = null
+    this.referenceMapServerUrl = null
+    this.referenceMapWorkDir = null
+  }
+
+  private ensureCurrentReferenceMaps(): boolean {
+    const matchesCurrentBackend =
+      Platform.isDesktop &&
+      !this.plugin.settings.lightRagUseRemote &&
+      this.referenceMapBackendIdentity ===
+        this.plugin.settings.lightRagBackendIdentity &&
+      this.referenceMapServerUrl === this.plugin.settings.lightRagServerUrl &&
+      this.referenceMapWorkDir === this.plugin.settings.lightRagWorkDir
+    if (!matchesCurrentBackend) this.clearReferenceMaps()
+    return matchesCurrentBackend
+  }
+
   // Not async: all file access here is synchronous (readFileSync).
   loadReferenceMaps() {
+    this.clearReferenceMaps()
+    if (!Platform.isDesktop || this.plugin.settings.lightRagUseRemote) return
+
     // Reuse the plugin's desktop-only Node modules; null on mobile → skip.
     const nodeFs = this.plugin._nodeFs
     const nodePath = this.plugin._nodePath
     if (!nodeFs || !nodePath) return
-    try {
-      const chunksPath = nodePath.join(
-        this.workDir,
-        'kv_store_text_chunks.json',
-      )
-      const docsPath = nodePath.join(this.workDir, 'kv_store_doc_status.json')
 
-      if (nodeFs.existsSync(chunksPath)) {
-        const content = nodeFs.readFileSync(chunksPath, 'utf-8')
-        this.chunkToDocMap = JSON.parse(content) as Record<string, ChunkDocMap>
-      }
+    const serverUrl = this.plugin.settings.lightRagServerUrl
+    const workDir = this.plugin.settings.lightRagWorkDir
+    const backendIdentity = this.plugin.settings.lightRagBackendIdentity
+    try {
+      const chunksPath = nodePath.join(workDir, 'kv_store_text_chunks.json')
+      const docsPath = nodePath.join(workDir, 'kv_store_doc_status.json')
+      const chunkToDocMap = nodeFs.existsSync(chunksPath)
+        ? (JSON.parse(nodeFs.readFileSync(chunksPath, 'utf-8')) as Record<
+            string,
+            ChunkDocMap
+          >)
+        : {}
+      const docToNameMap: Record<string, DocNameMap> = {}
 
       if (nodeFs.existsSync(docsPath)) {
         const raw = JSON.parse(
@@ -332,18 +458,21 @@ export class NativeGraphView extends ItemView {
         // kv_store_doc_status.json can use either the file path OR the doc ID as
         // the key depending on the LightRAG version. Build a map that is indexed
         // by BOTH so lookups via full_doc_id always succeed.
-        this.docToNameMap = {}
         for (const [key, val] of Object.entries(raw)) {
           const entry: DocNameMap = { ...val, _rawKey: key }
-          // Index by the raw key (may be a file path or doc ID)
-          this.docToNameMap[key] = entry
-          // Also index by the embedded id field if it differs from the key
+          docToNameMap[key] = entry
           const embeddedId = val.id as string | undefined
           if (embeddedId && embeddedId !== key) {
-            this.docToNameMap[embeddedId] = entry
+            docToNameMap[embeddedId] = entry
           }
         }
       }
+
+      this.chunkToDocMap = chunkToDocMap
+      this.docToNameMap = docToNameMap
+      this.referenceMapServerUrl = serverUrl
+      this.referenceMapWorkDir = workDir
+      this.referenceMapBackendIdentity = backendIdentity
     } catch (e) {
       console.error('Error loading maps', e)
     }
@@ -351,27 +480,24 @@ export class NativeGraphView extends ItemView {
 
   // --- API GRAPH METHODS ---
 
-  private getLightRagHeaders(): Record<string, string> {
+  private getLightRagHeaders(apiKey: string): Record<string, string> {
     const headers: Record<string, string> = {}
-    if (this.plugin.settings.lightRagApiKey) {
-      headers['X-API-Key'] = this.plugin.settings.lightRagApiKey
-    }
+    if (apiKey) headers['X-API-Key'] = apiKey
     return headers
   }
 
-  private get serverUrl(): string {
-    return this.plugin.settings.lightRagServerUrl
-  }
-
   /** Returns every label that exists in the graph (nodes with ≥1 edge). */
-  private async fetchAllLabels(): Promise<string[] | null> {
+  private async fetchAllLabels(
+    ownership: GraphOwnership,
+  ): Promise<string[] | null> {
     try {
       const resp = await requestUrl({
-        url: `${this.serverUrl}/graph/label/list`,
+        url: `${ownership.serverUrl}/graph/label/list`,
         method: 'GET',
-        headers: this.getLightRagHeaders(),
+        headers: this.getLightRagHeaders(ownership.apiKey),
         throw: false,
       })
+      if (!this.graphOwnershipIsCurrent(ownership)) return null
       if (resp.status !== 200) return null
       return Array.isArray(resp.json) ? (resp.json as string[]) : null
     } catch {
@@ -379,21 +505,26 @@ export class NativeGraphView extends ItemView {
     }
   }
 
-  private async fetchPopularLabel(): Promise<string | null> {
+  private async fetchPopularLabel(
+    ownership: GraphOwnership,
+  ): Promise<string | null> {
     try {
       const response = await requestUrl({
-        url: `${this.serverUrl}/graph/label/popular?limit=1`,
+        url: `${ownership.serverUrl}/graph/label/popular?limit=1`,
         method: 'GET',
-        headers: this.getLightRagHeaders(),
+        headers: this.getLightRagHeaders(ownership.apiKey),
         throw: false,
       })
+      if (!this.graphOwnershipIsCurrent(ownership)) return null
       if (response.status !== 200) return null
       const labels: string[] = (
         Array.isArray(response.json) ? (response.json as unknown[]) : []
       ).map(String)
       return labels.length > 0 ? labels[0] : null
     } catch (e) {
-      console.error('Failed to fetch popular labels:', e)
+      if (this.graphOwnershipIsCurrent(ownership)) {
+        console.error('Failed to fetch popular labels:', e)
+      }
       return null
     }
   }
@@ -403,14 +534,16 @@ export class NativeGraphView extends ItemView {
     maxDepth = 3,
     maxNodes = 500,
   ): Promise<{ nodes: GraphNode[]; edges: GraphMLRawEdge[] } | null> {
+    const ownership = this.captureGraphOwnership()
     try {
-      const url = `${this.serverUrl}/graphs?label=${encodeURIComponent(label)}&max_depth=${maxDepth}&max_nodes=${maxNodes}`
+      const url = `${ownership.serverUrl}/graphs?label=${encodeURIComponent(label)}&max_depth=${maxDepth}&max_nodes=${maxNodes}`
       const response = await requestUrl({
         url,
         method: 'GET',
-        headers: this.getLightRagHeaders(),
+        headers: this.getLightRagHeaders(ownership.apiKey),
         throw: false,
       })
+      if (!this.graphOwnershipIsCurrent(ownership)) return null
       if (response.status !== 200) return null
 
       const data = response.json as ApiKnowledgeGraph
@@ -423,6 +556,7 @@ export class NativeGraphView extends ItemView {
 
       const strProp = (v: unknown): string =>
         typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''
+      const useLocalReferenceMaps = this.ensureCurrentReferenceMaps()
       const nodes: GraphNode[] = data.nodes.map((n) => ({
         id: n.id,
         type: n.labels[0] || 'Concept',
@@ -435,7 +569,9 @@ export class NativeGraphView extends ItemView {
         // them loaded.
         file_paths:
           this.extractFilePathsFromProperty(n.properties.file_path) ??
-          this.getFilenames(strProp(n.properties.source_id)),
+          (useLocalReferenceMaps
+            ? this.getFilenames(strProp(n.properties.source_id))
+            : []),
       }))
 
       const edges: GraphMLRawEdge[] = data.edges.map((e) => ({
@@ -447,42 +583,27 @@ export class NativeGraphView extends ItemView {
 
       return { nodes, edges }
     } catch (e) {
-      console.error('Failed to fetch graph data:', e)
+      if (this.graphOwnershipIsCurrent(ownership)) {
+        console.error('Failed to fetch graph data:', e)
+      }
       return null
     }
   }
 
-  // Parse a `<SEP>`-joined `file_path` property from a LightRAG graph node
-  // into a list of basenames. Returns null when the property is missing/empty
-  // so the caller can fall back to chunk-id resolution.
-  //
-  // Split ONLY on `<SEP>` — filenames legitimately contain commas (especially
-  // Cyrillic-language quote / book titles), so a `<SEP>|,` split would shred a
-  // single path into several fake entries. The trim strips wrapping quotes /
-  // brackets only at the edges of each segment.
+  // Parse the documented `<SEP>`-joined `file_path` property while preserving
+  // every source identity exactly as supplied by LightRAG. Quotes, brackets,
+  // whitespace, and path separators can all be legal path characters.
   private extractFilePathsFromProperty(raw: unknown): string[] | null {
-    if (typeof raw !== 'string' || !raw.trim()) return null
-    const paths = raw
-      .split('<SEP>')
-      .map((s) =>
-        s
-          .trim()
-          .replace(/^['"[\]]+|['"[\]]+$/g, '')
-          .trim(),
-      )
-      .filter(Boolean)
-    if (paths.length === 0) return null
-    // Keep the full vault-relative path — the details panel shows the basename
-    // for readability, but the full path is needed to open the file on click.
-    return Array.from(new Set(paths.map((p) => p.replace(/\\/g, '/'))))
+    if (typeof raw !== 'string' || raw.length === 0) return null
+    const paths = raw.split('<SEP>').filter((path) => path.length > 0)
+    return paths.length > 0 ? Array.from(new Set(paths)) : null
   }
 
   getFilenames(sourceIds: string): string[] {
-    if (!sourceIds) return []
+    if (!sourceIds || !this.ensureCurrentReferenceMaps()) return []
     const chunks = sourceIds
-      .split(new RegExp('<SEP>|,'))
-      .map((s) => s.trim().replace(/['"[\]]/g, ''))
-      .filter(Boolean)
+      .split('<SEP>')
+      .filter((sourceId) => sourceId.length > 0)
     const fileNames = new Set<string>()
     chunks.forEach((chunkId) => {
       const chunkData = this.chunkToDocMap[chunkId]
@@ -502,10 +623,7 @@ export class NativeGraphView extends ItemView {
         (docData._rawKey as string) || // the raw JSON key (often is the file path)
         docData.id // doc ID as last-resort display name
       if (rawName) {
-        // Keep the full path — the basename is shown at render time, but the
-        // full path (or a bare basename for older kv_store entries) is needed
-        // to resolve the file on click.
-        fileNames.add(rawName.replace(/\\/g, '/'))
+        fileNames.add(rawName)
       }
     })
     return Array.from(fileNames)
@@ -513,7 +631,10 @@ export class NativeGraphView extends ItemView {
 
   // --- MAIN RENDER ---
   async render(container: HTMLElement) {
-    this.cleanup()
+    this.renderGeneration += 1
+    const generation = this.renderGeneration
+    const ownership = this.captureGraphOwnership()
+    this.cleanupRenderers()
     container.empty()
 
     const isOverview = !this.currentRootLabel
@@ -528,7 +649,8 @@ export class NativeGraphView extends ItemView {
     // in explore mode the root is already set by the user.
     let rootLabel = this.currentRootLabel
     if (isOverview) {
-      const popular = await this.fetchPopularLabel()
+      const popular = await this.fetchPopularLabel(ownership)
+      if (!this.renderIsCurrent(generation, ownership)) return
       if (!popular) {
         loadingEl.setText(
           'No graph data found. Ingest documents into the knowledge graph first.',
@@ -546,6 +668,7 @@ export class NativeGraphView extends ItemView {
       depth,
       this.currentMaxNodes,
     )
+    if (!this.renderIsCurrent(generation, ownership)) return
 
     loadingEl.remove()
 
@@ -560,7 +683,8 @@ export class NativeGraphView extends ItemView {
     // In overview mode: also fetch ALL labels so we can add nodes from
     // disconnected components that the BFS traversal could not reach.
     if (isOverview) {
-      const allLabels = await this.fetchAllLabels()
+      const allLabels = await this.fetchAllLabels(ownership)
+      if (!this.renderIsCurrent(generation, ownership)) return
       if (allLabels) {
         const existingIds = new Set(data.nodes.map((n) => n.id))
         const isolated: GraphNode[] = allLabels
@@ -596,6 +720,7 @@ export class NativeGraphView extends ItemView {
       this.pendingDetailNode = null
       // Small delay so sigma/forcegraph finishes initial setup
       window.setTimeout(() => {
+        if (!this.renderIsCurrent(generation, ownership)) return
         const enriched = this.allNodes.find((n) => n.id === targetId)
         if (!enriched) return
         if (mode === '2d') {
@@ -719,7 +844,10 @@ export class NativeGraphView extends ItemView {
     nodes: GraphNode[],
     edges: GraphMLRawEdge[],
   ) {
-    this.graph = new Graph()
+    const generation = this.renderGeneration
+    const ownership = this.captureGraphOwnership()
+    const graph = new Graph()
+    this.graph = graph
     const LABEL_THRESHOLD = 4
     const isDarkTheme = activeDocument.body.classList.contains('theme-dark')
 
@@ -768,6 +896,12 @@ export class NativeGraphView extends ItemView {
     })
 
     const initSigma = () => {
+      if (
+        !this.renderIsCurrent(generation, ownership) ||
+        this.graph !== graph
+      ) {
+        return
+      }
       if (container.clientWidth === 0) {
         window.requestAnimationFrame(initSigma)
         return
@@ -871,16 +1005,22 @@ export class NativeGraphView extends ItemView {
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment -- graphology-layout-forceatlas2 types not resolved by ESLint's TypeScript program
       const settings = forceAtlas2.inferSettings(this.graph)
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment -- FA2Layout constructor not resolved by ESLint's TypeScript program
-      this.fa2Layout = new FA2Layout(this.graph, {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call -- FA2Layout constructor not resolved by ESLint's TypeScript program
+      const layout = new FA2Layout(this.graph, {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- settings spread from untyped forceAtlas2 result
         settings: { ...settings, gravity: 1, slowDown: 5 },
-      })
-      // FIXED: Optional chaining to prevent "Object is possibly null"
-      this.fa2Layout?.start()
+      }) as unknown as FA2LayoutInstance
+      this.fa2Layout = layout
+      layout.start()
 
       window.setTimeout(() => {
-        if (this.fa2Layout?.isRunning()) this.fa2Layout.stop()
+        if (
+          this.renderIsCurrent(generation, ownership) &&
+          this.fa2Layout === layout &&
+          layout.isRunning()
+        ) {
+          layout.stop()
+        }
       }, 4000)
 
       // --- EVENTS ---
@@ -939,6 +1079,8 @@ export class NativeGraphView extends ItemView {
     nodes: GraphNode[],
     edges: GraphMLRawEdge[],
   ) {
+    const generation = this.renderGeneration
+    const ownership = this.captureGraphOwnership()
     const gData = {
       nodes: nodes.map((n) => ({ ...n, type: n.type })),
       links: edges.map((e) => ({
@@ -949,6 +1091,7 @@ export class NativeGraphView extends ItemView {
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- 3d-force-graph lacks TypeScript declarations
     const { default: ForceGraph3D } = await import('3d-force-graph')
+    if (!this.renderIsCurrent(generation, ownership)) return
     this.graph3D = (ForceGraph3D as unknown as ForceGraph3DConstructor)()(
       container,
     )
@@ -989,7 +1132,7 @@ export class NativeGraphView extends ItemView {
     this.graph3D?.height(container.clientHeight)
   }
 
-  cleanup() {
+  private cleanupRenderers() {
     if (this.sigmaInstance) {
       this.sigmaInstance.kill()
       this.sigmaInstance = null
@@ -1002,6 +1145,17 @@ export class NativeGraphView extends ItemView {
       this.graph3D._destructor()
       this.graph3D = null
     }
+  }
+
+  cleanup() {
+    this.renderGeneration += 1
+    this.cleanupRenderers()
+    this.clearReferenceMaps()
+    this.graph = null
+    this.allNodes = []
+    this.filteredNodes = []
+    this.selectedNodes.clear()
+    this.pendingDetailNode = null
   }
 
   updateSidebarList() {
@@ -1072,7 +1226,9 @@ export class NativeGraphView extends ItemView {
     const ul = sourcesSection.createEl('ul', { cls: 'nrlcmp-sources-list' })
 
     if (files.length > 0) {
-      files.forEach((fullPath: string) => {
+      files.forEach((source: string) => {
+        const fullPath =
+          this.plugin.docIndexService?.resolveSource(source) ?? source
         const basename =
           fullPath.replace(/\\/g, '/').split('/').pop() || fullPath
         const li = ul.createEl('li', { cls: 'nrlcmp-source-item' })
@@ -1088,14 +1244,11 @@ export class NativeGraphView extends ItemView {
         link.onclick = (ev) => {
           ev.preventDefault()
           ev.stopPropagation()
-          // getFirstLinkpathDest resolves both full vault-relative paths and
-          // bare basenames (older kv_store entries) and returns null for files
-          // not in the vault — unlike openLinkText, which would create one.
-          const target = this.app.metadataCache.getFirstLinkpathDest(
-            fullPath,
-            '',
-          )
-          if (target) {
+          const resolved = this.plugin.docIndexService?.resolveSource(source)
+          const target = resolved
+            ? this.app.vault.getAbstractFileByPath(resolved)
+            : null
+          if (target instanceof TFile) {
             void this.app.workspace.getLeaf('tab').openFile(target)
           } else {
             new Notice(`Source file not found in vault: ${fullPath}`)
@@ -1408,6 +1561,8 @@ export class NativeGraphView extends ItemView {
     if (this.searchInputEl) this.searchInputEl.value = ''
     if (!this.sidebarListEl) return
 
+    const generation = this.renderGeneration
+    const ownership = this.captureGraphOwnership()
     this.sidebarListEl.empty()
     const loadingRow = this.sidebarListEl.createDiv({ cls: 'nrlcmp-list-more' })
     loadingRow.setText('Loading all entities...')
@@ -1415,11 +1570,12 @@ export class NativeGraphView extends ItemView {
     try {
       // Step 1: get every label that exists in the graph (nodes in any edge)
       const listResp = await requestUrl({
-        url: `${this.serverUrl}/graph/label/list`,
+        url: `${ownership.serverUrl}/graph/label/list`,
         method: 'GET',
-        headers: this.getLightRagHeaders(),
+        headers: this.getLightRagHeaders(ownership.apiKey),
         throw: false,
       })
+      if (!this.renderIsCurrent(generation, ownership)) return
       if (listResp.status !== 200) {
         loadingRow.setText(`Failed to load entities (HTTP ${listResp.status}).`)
         return
@@ -1431,11 +1587,12 @@ export class NativeGraphView extends ItemView {
       // Any label NOT returned here (after requesting up to 1000) that IS in
       // graphLabels has degree 0 in the stored graph → true orphan node.
       const popularResp = await requestUrl({
-        url: `${this.serverUrl}/graph/label/popular?limit=1000`,
+        url: `${ownership.serverUrl}/graph/label/popular?limit=1000`,
         method: 'GET',
-        headers: this.getLightRagHeaders(),
+        headers: this.getLightRagHeaders(ownership.apiKey),
         throw: false,
       })
+      if (!this.renderIsCurrent(generation, ownership)) return
       const popularLabels: string[] = (
         popularResp.status === 200 && Array.isArray(popularResp.json)
           ? (popularResp.json as unknown[])
@@ -1464,7 +1621,9 @@ export class NativeGraphView extends ItemView {
       this.filteredNodes = [...this.allNodes, ...extra]
       this.renderList()
     } catch (e) {
-      loadingRow.setText(`Error loading entities: ${String(e)}`)
+      if (this.renderIsCurrent(generation, ownership)) {
+        loadingRow.setText(`Error loading entities: ${String(e)}`)
+      }
     }
   }
 

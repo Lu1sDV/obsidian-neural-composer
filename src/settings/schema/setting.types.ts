@@ -125,6 +125,10 @@ export const NeuralComposerSettingsSchema = z.object({
   lightRagMaxParallelInsert: z.number().catch(1),
   lightRagChunkSize: z.number().catch(1200),
   lightRagChunkOverlap: z.number().catch(100),
+  lightRagChunkingStrategy: z.enum(['legacy', 'paragraph']).catch('legacy'),
+  lightRagVaultNamespace: z.string().catch(''),
+  lightRagBackendIdentity: z.string().catch(''),
+  lightRagImageDownloadsDisabledFor: z.string().catch(''),
 
   // --- INCREMENTAL SYNC ---
   lightRagSyncFolder: z.string().catch(''),
@@ -210,6 +214,10 @@ export const DEFAULT_SETTINGS: NeuralComposerSettings = {
   lightRagMaxParallelInsert: 1,
   lightRagChunkSize: 1200,
   lightRagChunkOverlap: 100,
+  lightRagChunkingStrategy: 'legacy',
+  lightRagVaultNamespace: '',
+  lightRagBackendIdentity: '',
+  lightRagImageDownloadsDisabledFor: '',
 
   // DEFAULT NUEVO
   lightRagCustomEnv: '',

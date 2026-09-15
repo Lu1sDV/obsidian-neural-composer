@@ -89,4 +89,42 @@ describe('parseNeuralComposerSettings', () => {
 
     expect(settings.providers).toEqual([provider])
   })
+
+  it('defaults migrated installs to legacy processing with unassigned identities', () => {
+    const settings = parseNeuralComposerSettings({
+      version: 15,
+      lightRagChunkSize: 1600,
+      lightRagChunkOverlap: 80,
+    })
+    expect(DEFAULT_SETTINGS).toMatchObject({
+      version: 16,
+      lightRagChunkingStrategy: 'legacy',
+      lightRagChunkSize: 1200,
+      lightRagChunkOverlap: 100,
+      lightRagVaultNamespace: '',
+      lightRagBackendIdentity: '',
+      lightRagImageDownloadsDisabledFor: '',
+    })
+
+    expect(settings).toMatchObject({
+      version: 16,
+      lightRagChunkingStrategy: 'legacy',
+      lightRagChunkSize: 1600,
+      lightRagChunkOverlap: 80,
+      lightRagVaultNamespace: '',
+      lightRagBackendIdentity: '',
+      lightRagImageDownloadsDisabledFor: '',
+    })
+  })
+
+  it('retains numeric values that need explicit correction instead of replacing them', () => {
+    const settings = parseNeuralComposerSettings({
+      version: 15,
+      lightRagChunkSize: 0.5,
+      lightRagChunkOverlap: 1,
+    })
+
+    expect(settings.lightRagChunkSize).toBe(0.5)
+    expect(settings.lightRagChunkOverlap).toBe(1)
+  })
 })

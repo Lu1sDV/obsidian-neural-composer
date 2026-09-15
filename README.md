@@ -29,6 +29,7 @@ Chat with your vault using a **Knowledge Graph**, not just keyword search. Neura
 | **⚡ Automated Server** | Starts and stops the LightRAG Python process automatically. No terminal needed. |
 | **🧠 Graph + Vector Search** | Combines entity-relationship traversal with semantic vector search for deep, contextual answers. |
 | **📂 Vault Sync** | Set a watched folder — notes are re-indexed on save. Status dots in the file explorer show each note's graph state: 🟢 processed · 🟡 processing · 🔴 failed · 🔵 removed. |
+| **Document Processing** | Choose the processing policy and chunk limits for new documents, then explicitly reprocess, retry, or re-add notes through a recoverable lifecycle. Native paragraph mode is present but production-gated; LightRAG 1.5.7 is blocked. |
 | **📊 Knowledge Graph View** | Explore your graph visually in 2D or 3D. Overview mode renders all nodes; Explore mode does a BFS walk from any entity. |
 | **🌐 Remote Server** | Connect to a LightRAG instance on a NAS, VPS, or Docker container. |
 | **🤖 MCP Tools** | Expose your graph to any MCP-compatible client (Claude Desktop, etc.). |
@@ -87,13 +88,58 @@ Open **Settings → Neural Composer**. The panel has a sidebar with seven tabs:
 1. **Providers** — add your API keys (OpenAI, Anthropic, Gemini, Z.ai, Groq, Ollama, etc.)
 2. **Models** — select your chat, apply, and embedding models
 3. **Graph & Vault** — set the `lightrag-server` path, choose a data directory, and optionally configure a **Watched Folder** for auto-sync
-4. Toggle **Auto-start** on, then click **Restart Server**
+4. In **Graph & Vault → Document processing**, keep the default **Existing behavior** processing mode, or review the compatibility and privacy gates before selecting **Native paragraph**
+5. Toggle **Auto-start** on, then click **Restart Server**
 
 A green dot in the status bar confirms the server is running. Right-click any folder in your vault to ingest notes and start chatting.
 
 Model discovery runs after saving credentials and when opening a model picker with a missing or expired catalog (24 hours). There is no background polling. Newly discovered models are added to the Models list with provider-qualified IDs; existing and removed models are never changed or deleted automatically. Manual model entry remains available. Z.ai uses the general API endpoint, not the Coding Plan endpoint.
 
 An authenticated model-list request returning HTTP 404 disables discovery for that provider endpoint, including after restart or key changes. **Refresh** respects this saved state. Use **Reset model discovery** or change the endpoint to try again. Authentication and temporary network failures do not mark an endpoint unsupported.
+
+### Document processing and safe reprocessing
+
+**Existing behavior** remains the default for new and upgraded installations. Processing mode, maximum chunk tokens, and overlap apply to newly ingested documents only. Ordinary watched-folder updates keep each existing document's recorded policy; changing the controls does not reprocess the graph or restart the server.
+
+> **Native paragraph is not currently available for production ingestion.** Unmodified LightRAG 1.5.7 drops Markdown pipe-table headers, and no upstream release has yet passed Neural Composer's content-preservation gate. Selecting **Native paragraph** does not bypass this check: Markdown and DOCX submissions pause unless the connected backend is approved and the image-download prerequisite below is operator-confirmed.
+
+<details>
+<summary>Diagnostic Existing behavior versus Native paragraph comparison</summary>
+
+One fixed-order run used four synthetic Markdown documents, four queries, real Z.ai `glm-5.3-flash`, and real local `jina-v5-nano-retrieval:q8` embeddings:
+
+| Observed measure | Existing behavior | Native paragraph |
+|:---|---:|---:|
+| Stored chunks | 9 | 10 |
+| Stored token-counter sum | 969 | 969 |
+| Sequential ingestion wall time | 161.542 s | 160.041 s |
+| Query wall-time total | 20.260 s | 30.566 s |
+| Ingestion LLM tokens | 54,281 | 57,830 |
+| Query LLM tokens | 11,921 | 12,477 |
+| Requested facts answered (Sol assessment) | 4/4 | 3/4 |
+| Clean structured citations | 3/4 | 3/4 |
+| Expected sources retrieved | 4/4 | 4/4 |
+
+All eight expected source retrievals succeeded. Native paragraph's only genuine unanswered query was the pipe-table lookup: the document was retrieved, but LightRAG 1.5.7 had removed the header labels needed to relate the values. Simple substring scoring also misgraded accurate answers that mentioned distractors only to negate them, so its raw score is not a semantic-quality result.
+
+This was one unreplicated, non-counterbalanced run. The two modes use their real but different transports, provider prompt caching was asymmetric, and the longer failed table answer explains most of the query-time gap. The Coding Plan response supplied token counters but no currency billing, so monetary cost is unknown. These measurements demonstrate no general quality, speed, or cost advantage for either mode and do not override the production block.
+
+</details>
+
+To adopt the current controls for an existing note or folder, use its context-menu action **Reprocess with current settings**. Replacement is intentionally recoverable but not atomic: the old graph contribution is deleted and confirmed before the replacement is uploaded and tracked, so retrieval has a gap and the replacement incurs normal embedding and model costs. A document intentionally removed from the graph stays removed during sync; use **Re-add to graph** to add it again.
+
+Cancellation before a backend mutation leaves the old graph data in place. After the backend has accepted a deletion or upload, cancellation cannot roll it back; Neural Composer preserves the pending operation and reconciles it on retry or plugin reload. **Retry failed processing** retains the settings captured by the failed operation rather than adopting the current controls. If the source changed or an acknowledgement is uncertain, synchronization pauses for review instead of blindly resubmitting.
+
+Documents created by older versions are resolved by exact known source identity. A full legacy vault path can be matched exactly; basename-only records require **Map existing graph document** and an explicit server-document selection. Neural Composer never guesses between ambiguous basenames. If a mapped document's historical policy cannot be established from server metadata, automatic replacement remains paused until **Reprocess with current settings** explicitly adopts a policy.
+
+The read-only **Vault namespace** is part of every managed source identity. Devices sharing one Obsidian vault and one backend graph must sync the same plugin settings, including this namespace. Document records and pending work also belong to a generated backend identity. Connection changes rotate that identity. Use **Backend replaced or reconfigured → Reset & revalidate** only when the deployment or graph changed behind the same connection; it resets plugin ownership and privacy confirmation, but does not modify or delete backend graph data.
+
+Native Markdown can download external images, so `NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false` and a LightRAG restart are prerequisites:
+
+- **Managed local server:** **Configure & restart** writes a verified Neural Composer-managed block and requests a restart, then you must confirm the effective running setting. The plugin does not verify that runtime value. Ordinary generated-configuration updates replace only the managed block while preserving unrelated hand-edited content, CRLF/LF style, Unicode, and multiline values outside it. Malformed/ambiguous markers or an externally changed file stop the write and keep the original.
+- **Remote server (including mobile):** set the value and restart LightRAG on the server host, then enable **Operator confirmation**. The plugin cannot read or enforce a remote filesystem setting, so this is operator-confirmed rather than verified.
+
+Confirmation is scoped to the current backend identity and is cleared when the connection or backend ownership changes.
 
 ---
 
@@ -118,7 +164,8 @@ An authenticated model-list request returning HTTP 404 disables discovery for th
 | **Reranking** | Settings → Graph & Vault → Reranking — Jina AI, Cohere, or a custom local endpoint |
 | **MCP Servers** | Settings → Tools (MCP) |
 | **Graph Visualization** | Settings → Graph & Vault → Graph rendering engine — 2D (fast) or 3D (immersive) |
-| **Performance Tuning** | Settings → Advanced — chunk size, overlap, async workers |
+| **Document Processing** | Settings → Graph & Vault → Document processing — mode, chunk limits, compatibility, namespace, and image-download prerequisite |
+| **Performance Tuning** | Settings → Advanced — async workers and server configuration |
 | **Custom `.env` overrides** | Settings → Advanced — raw `.env` editor with full LightRAG configuration access |
 
 </details>
@@ -168,6 +215,11 @@ Neural Composer is designed with privacy as a core principle.
 ### Unreleased
 - Add Z.ai as a default provider while preserving existing provider settings.
 - Discover and automatically add provider models with provider-qualified IDs, a 24-hour cache, manual entry, and persistent suppression after authenticated HTTP 404 responses.
+- Add document-processing controls with safe legacy defaults, per-document policy pinning, exact legacy source mapping, and explicit reprocess, retry, remove, and re-add actions.
+- Add backend-scoped, reload-safe document lifecycle tracking and deterministic shared-vault source identities; replacements now disclose their non-atomic retrieval gap and ingestion cost.
+- Preserve unrelated managed-local `.env` content across ordinary configuration regeneration by updating only a verified Neural Composer-managed block and rejecting stale or malformed writes.
+- Restrict backend shutdown to the plugin-owned process tree. Remote servers and independently started local servers are never terminated by port or executable name.
+- Add a hard native-paragraph compatibility gate and external-image operator confirmation. Every release measured by the preservation corpus (LightRAG 1.5.4 through 1.5.7) omits Markdown pipe-table header rows from the block content paragraph chunking consumes, and unreleased `main` still does; 1.5.0 through 1.5.3 have no native Markdown engine. No upstream release is approved, so native paragraph ingestion stays blocked.
 
 ### v1.4.0 — 2026-05-27
 - **Mobile support (iOS / Android)** — plugin loads on Obsidian mobile and chats against a remote LightRAG server over HTTP. `lightRagUseRemote` is forced on, local-server management settings are hidden, and the bundle ships an `events` polyfill plus a `require` shim so node-only deps don't abort module evaluation on a non-Electron webview.

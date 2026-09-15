@@ -12,15 +12,23 @@ import {
   requestUrl,
   setTooltip,
 } from 'obsidian'
+import { v4 as uuidv4 } from 'uuid'
 
 import { ApplyView } from './ApplyView'
 import { ChatView } from './ChatView'
 import { ChatProps } from './components/chat-view/Chat'
 import { ConfirmModal } from './components/modals/ConfirmModal'
+import { GraphDocumentMappingModal } from './components/modals/GraphDocumentMappingModal'
 import { APPLY_VIEW_TYPE, CHAT_VIEW_TYPE } from './constants'
 import { ModelCatalog } from './core/llm/modelCatalog'
 import { McpManager } from './core/mcp/mcpManager'
 import { DocIndexService } from './core/rag/docIndexService'
+import {
+  ProcessingPolicy,
+  documentSourceName,
+  isParagraphFile,
+  processingPolicy,
+} from './core/rag/documentProcessing'
 import { FileExplorerDecorator } from './core/rag/fileExplorerDecorator'
 import { RAGEngine } from './core/rag/ragEngine'
 import { DatabaseManager } from './database/DatabaseManager'
@@ -49,6 +57,35 @@ export const TERM_LLM_EMBED = 'LLM/Embed'
 export const CMD_INGEST_FOLDER = 'Ingest folder into graph'
 export const VAR_MAX_ASYNC = 'MAX_ASYNC' // Nombre de variable de entorno/configuración
 
+const MANAGED_ENV_BEGIN = '# BEGIN NEURAL COMPOSER MANAGED ENV'
+const MANAGED_ENV_END = '# END NEURAL COMPOSER MANAGED ENV'
+// Complete native SDK endpoints; generated defaults bypass OpenAI /v1 normalization.
+const NATIVE_PROVIDER_DEFAULT_HOSTS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+  gemini: 'https://generativelanguage.googleapis.com',
+  ollama: 'http://localhost:11434',
+}
+const KNOWN_PROVIDER_BASE_URLS: Record<string, string> = {
+  openrouter: 'https://openrouter.ai/api/v1',
+  groq: 'https://api.groq.com/openai/v1',
+  deepseek: 'https://api.deepseek.com',
+  mistral: 'https://api.mistral.ai/v1',
+  perplexity: 'https://api.perplexity.ai',
+  morph: 'https://api.morph.so/v1',
+  'lm-studio': 'http://localhost:1234/v1',
+}
+
+function hasExplicitEnvValue(content: string, key: string): boolean {
+  const prefix = `${key}=`
+  return content.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith(prefix)) return false
+    const value = trimmed.slice(prefix.length).trim()
+    return value !== '' && value !== "''" && value !== '""'
+  })
+}
+
 // --- MASTER EXTENSION LIST ---
 const SUPPORTED_EXTENSIONS = [
   'md',
@@ -60,39 +97,6 @@ const SUPPORTED_EXTENSIONS = [
   'rtf',
   'odt',
   'epub',
-  'html',
-  'htm',
-  'xml',
-  'json',
-  'yaml',
-  'yml',
-  'csv',
-  'tex',
-  'log',
-  'conf',
-  'ini',
-  'properties',
-  'sql',
-  'bat',
-  'sh',
-  'c',
-  'cpp',
-  'py',
-  'java',
-  'js',
-  'ts',
-  'swift',
-  'go',
-  'rb',
-  'php',
-  'css',
-  'scss',
-  'less',
-]
-
-const TEXT_BASED_EXTENSIONS = [
-  'md',
-  'txt',
   'html',
   'htm',
   'xml',
@@ -149,13 +153,25 @@ type BufferLike = {
 type NodeFsLike = {
   existsSync(path: string): boolean
   mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined
-  writeFileSync(path: string, data: string): void
+  writeFileSync(path: string, data: string, options?: { mode?: number }): void
   readFileSync(path: string, encoding: string): string
+  renameSync(oldPath: string, newPath: string): void
+  unlinkSync(path: string): void
 }
 
 type NodePathLike = {
   join(...paths: string[]): string
 }
+
+export type EnvEditorSnapshot = {
+  content: string
+  backendIdentity: string
+  envPath: string
+  originalContent: string
+  originalExists: boolean
+}
+
+type EnvFileSource = Omit<EnvEditorSnapshot, 'content'>
 
 type NodeReadableStreamLike = {
   on(
@@ -165,6 +181,7 @@ type NodeReadableStreamLike = {
 }
 
 type NodeChildProcessLike = {
+  readonly pid: number
   readonly stdout: NodeReadableStreamLike | null
   readonly stderr: NodeReadableStreamLike | null
   kill(signal?: string): boolean
@@ -177,6 +194,7 @@ type NodeChildProcessLike = {
 
 type NodeSpawnOptions = {
   cwd?: string
+  detached?: boolean
   shell?: boolean
   env?: Record<string, string | undefined>
 }
@@ -206,6 +224,7 @@ type NodeNetModuleLike = {
 }
 
 type NodeProcessLike = {
+  kill(pid: number, signal?: string): boolean
   platform: string
   env: Record<string, string | undefined>
 }
@@ -229,6 +248,7 @@ export default class NeuralComposerPlugin extends Plugin {
   ragEngine: RAGEngine | null = null
 
   private dbManagerInitPromise: Promise<DatabaseManager> | null = null
+  private docIndexLoadPromise: Promise<DocIndexService> | null = null
   private ragEngineInitPromise: Promise<RAGEngine> | null = null
 
   private timeoutIds: number[] = []
@@ -241,6 +261,13 @@ export default class NeuralComposerPlugin extends Plugin {
   /** True once the doc-status index has been loaded from disk. Prevents vault
    *  events that fire during Obsidian startup from re-submitting already-ingested files. */
   private docIndexReady = false
+  private graphBatchAbort: AbortController | null = null
+  private graphSyncTail: Promise<void> = Promise.resolve()
+  private graphDisposed = false
+  private deferredGraphChanges = new Map<
+    string,
+    { path: string; previousPath?: string; remove: boolean }
+  >()
 
   /** Detected LightRAG core version (from GET /health → core_version). Null when offline or not yet checked. */
   public lightRagServerVersion: string | null = null
@@ -482,363 +509,174 @@ export default class NeuralComposerPlugin extends Plugin {
       }),
     )
 
-    // --- SINGLE FILE INGEST COMMAND ---
     this.addCommand({
       id: 'ingest-current-file',
       name: 'Ingest current file into knowledge graph',
-      checkCallback: (checking: boolean) => {
+      checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile()
         if (
           !file ||
           !SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase())
-        ) {
+        )
           return false
+        if (!checking) void this.runGraphBatch([file], 'new')
+        return true
+      },
+    })
+    this.addCommand({
+      id: 'reprocess-current-file',
+      name: 'Reprocess current file with current settings',
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile()
+        if (
+          !file ||
+          !SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase())
+        )
+          return false
+        if (!checking) void this.confirmGraphReprocessing([file])
+        return true
+      },
+    })
+    this.addCommand({
+      id: 'cancel-graph-processing',
+      name: 'Cancel graph processing batch',
+      callback: () => {
+        if (!this.graphBatchAbort) {
+          new Notice('No graph processing batch is running.')
+          return
         }
-        if (checking) return true
-
-        // IIFE to handle async in callback safely
-        void (async () => {
-          const title = file.basename
-          const ext = file.extension.toLowerCase()
-          const notice = new Notice(
-            `Sending "${file.name}" to the system...`,
-            0,
-          )
-
-          try {
-            const ragEngine = await this.getRAGEngine()
-            let success = false
-
-            if (TEXT_BASED_EXTENSIONS.includes(ext)) {
-              const content = await this.app.vault.read(file)
-              const finalContent =
-                ext === 'md' ? `Title: ${title}\n\n${content}` : content
-              success = await ragEngine.insertDocument(finalContent, file.path)
-            } else {
-              success = await ragEngine.uploadDocument(file)
-            }
-
-            if (success) {
-              notice.setMessage(`Sent. Processing in background...`)
-              await this.monitorPipeline(notice)
-            } else {
-              notice.setMessage(`Upload failed.`)
-              window.setTimeout(() => notice.hide(), 5000)
-            }
-          } catch (error) {
-            console.error(error)
-            notice.setMessage(`Critical error connecting to backend.`)
-            window.setTimeout(() => notice.hide(), 5000)
-          }
-        })()
+        this.graphBatchAbort.abort()
+        new Notice(
+          'Stopping further submissions; accepted server work may continue.',
+        )
+      },
+    })
+    this.addCommand({
+      id: 'resume-graph-sync',
+      name: 'Resume queued graph synchronization',
+      callback: () => {
+        if (this.graphBatchAbort) {
+          new Notice('Wait for the current batch to stop.')
+          return
+        }
+        const changes = [...this.deferredGraphChanges.values()]
+        this.deferredGraphChanges.clear()
+        for (const change of changes) this.queueGraphChange(change)
+        new Notice(
+          `Resuming ${changes.length} queued graph change(s). Failed operations still require explicit retry.`,
+        )
       },
     })
 
-    // --- INCREMENTAL SYNC: vault event listeners ---
-    // Only active when the user has configured a watched sync folder.
-    // isInSyncFolder checks that the file lives inside (or at) that folder.
-    const isInSyncFolder = (filePath: string): boolean => {
-      const syncFolder = this.settings.lightRagSyncFolder.trim()
-      if (!syncFolder) return false
-      const normalized = syncFolder.endsWith('/')
-        ? syncFolder
-        : `${syncFolder}/`
-      return filePath === syncFolder || filePath.startsWith(normalized)
+    const refreshSources = () => {
+      if (this.docIndexReady) {
+        void this.docIndexService
+          ?.rebuildSourceMap()
+          .catch((error: unknown) =>
+            console.error('Document source reconciliation failed', error),
+          )
+      }
     }
 
     this.registerEvent(
       this.app.vault.on('create', (file) => {
-        if (!(file instanceof TFile)) return
-        if (!isInSyncFolder(file.path)) return
-        if (!SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase())) return
-        if (this.isPathExcludedFromGraph(file.path)) return
-        // Guard here (before setTimeout) so startup create-events are dropped
-        // before the 2 s timer is even scheduled. By the time the timer would
-        // fire, onLayoutReady has already set docIndexReady = true, so the
-        // guard inside the async callback would be bypassed on every startup file.
-        if (!this.docIndexReady) return
-        // Wait 2 s so the file content is available (especially for moves/imports)
-        window.setTimeout(() => {
-          void (async () => {
-            // Skip if already processed and not modified
-            if (
-              this.docIndexService &&
-              !this.docIndexService.needsIngestion(file.path, file.stat.mtime)
-            ) {
-              return
-            }
-            const notice = new Notice(
-              `Graph sync: sending "${file.name}"...`,
-              0,
-            )
-            const ragEngine = await this.getRAGEngine()
-            this.docIndexService?.setProcessing(file.path, file.stat.mtime)
-            const ok = await ragEngine.ingestFile(file)
-            if (!ok) {
-              this.docIndexService?.setFailed(file.path)
-            } else {
-              // Poll pipeline_status every 1 s → sync when done → update dots
-              this.docIndexService?.startPipelineWatch(1000)
-            }
-            notice.setMessage(
-              ok
-                ? `Graph sync: "${file.name}" sent — processing in background.`
-                : `Graph sync: failed to send "${file.name}".`,
-            )
-            window.setTimeout(() => notice.hide(), 6000)
-          })()
-        }, 2000)
+        refreshSources()
+        if (!(file instanceof TFile) || !this.docIndexReady) return
+        if (!this.isWatchedGraphPath(file.path)) return
+        this.scheduleGraphSync(file, 2000)
       }),
     )
-
-    this.registerEvent(
-      this.app.vault.on('delete', (file) => {
-        if (!(file instanceof TFile)) return
-        if (!isInSyncFolder(file.path)) return
-        void (async () => {
-          const notice = new Notice(
-            `Graph sync: removing "${file.name}" from index...`,
-            0,
-          )
-          const ragEngine = await this.getRAGEngine()
-          const removed = await ragEngine.deleteDocumentByFilePath(
-            file.path,
-            file.name,
-          )
-          if (removed) this.docIndexService?.removeEntry(file.path)
-          notice.setMessage(
-            removed
-              ? `Graph sync: "${file.name}" removed from graph.`
-              : `Graph sync: "${file.name}" was not in the graph.`,
-          )
-          window.setTimeout(() => notice.hide(), 6000)
-        })()
-      }),
-    )
-
-    this.registerEvent(
-      this.app.vault.on('rename', (file, oldPath) => {
-        if (!(file instanceof TFile)) return
-        const wasInFolder = isInSyncFolder(oldPath)
-        const nowInFolder = isInSyncFolder(file.path)
-        if (!wasInFolder && !nowInFolder) return
-        void (async () => {
-          const ragEngine = await this.getRAGEngine()
-
-          if (wasInFolder && nowInFolder) {
-            // Renamed or moved within the watched folder.
-            // If the new path is now excluded, remove the old doc and stop.
-            if (this.isPathExcludedFromGraph(file.path)) {
-              const oldName = oldPath.split('/').pop() ?? oldPath
-              await ragEngine.deleteDocumentByFilePath(oldPath, oldName)
-              this.docIndexService?.removeEntry(oldPath)
-              return
-            }
-            const notice = new Notice(
-              `Graph sync: updating "${file.name}" in graph...`,
-              0,
-            )
-            const oldName = oldPath.split('/').pop() ?? oldPath
-            await ragEngine.deleteDocumentByFilePath(oldPath, oldName)
-            this.docIndexService?.renameEntry(oldPath, file.path)
-            const ok = await ragEngine.ingestFile(file)
-            notice.setMessage(
-              ok
-                ? `Graph sync: graph updated for "${file.name}".`
-                : `Graph sync: failed to update "${file.name}".`,
-            )
-            window.setTimeout(() => notice.hide(), 6000)
-          } else if (wasInFolder) {
-            // Moved OUT of the watched folder
-            const notice = new Notice(
-              `Graph sync: removing "${file.name}" from graph...`,
-              0,
-            )
-            const oldName = oldPath.split('/').pop() ?? oldPath
-            const removed = await ragEngine.deleteDocumentByFilePath(
-              oldPath,
-              oldName,
-            )
-            notice.setMessage(
-              removed
-                ? `Graph sync: "${file.name}" removed from graph.`
-                : `Graph sync: "${file.name}" was not in the graph.`,
-            )
-            window.setTimeout(() => notice.hide(), 6000)
-          } else {
-            // Moved INTO the watched folder
-            if (this.isPathExcludedFromGraph(file.path)) return
-            const notice = new Notice(
-              `Graph sync: sending "${file.name}"...`,
-              0,
-            )
-            this.docIndexService?.setProcessing(file.path, file.stat.mtime)
-            const ok = await ragEngine.ingestFile(file)
-            if (!ok) {
-              this.docIndexService?.setFailed(file.path)
-            } else {
-              this.docIndexService?.startPipelineWatch(1000)
-            }
-            notice.setMessage(
-              ok
-                ? `Graph sync: "${file.name}" sent — processing in background.`
-                : `Graph sync: failed to send "${file.name}".`,
-            )
-            window.setTimeout(() => notice.hide(), 6000)
-          }
-        })()
-      }),
-    )
-
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
-        if (!(file instanceof TFile)) return
-        if (!isInSyncFolder(file.path)) return
-        if (!SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase())) return
-        if (this.isPathExcludedFromGraph(file.path)) return
-
-        // Debounce: wait 5 s of inactivity before re-indexing
-        const existing = this.modifyDebounceMap.get(file.path)
-        if (existing) window.clearTimeout(existing)
-        const id = window.setTimeout(() => {
-          this.modifyDebounceMap.delete(file.path)
-          void (async () => {
-            if (!this.docIndexReady) return
-            // Skip if not modified since last ingestion
-            if (
-              this.docIndexService &&
-              !this.docIndexService.needsIngestion(file.path, file.stat.mtime)
-            ) {
-              return
-            }
-            const notice = new Notice(
-              `Graph sync: re-indexing "${file.name}"...`,
-              0,
-            )
-            const ragEngine = await this.getRAGEngine()
-            this.docIndexService?.setProcessing(file.path, file.stat.mtime)
-            const ok = await ragEngine.reindexFile(file)
-            if (!ok) {
-              this.docIndexService?.setFailed(file.path)
-            } else {
-              this.docIndexService?.startPipelineWatch(1000)
-            }
-            notice.setMessage(
-              ok
-                ? `Graph sync: "${file.name}" sent — processing in background.`
-                : `Graph sync: failed to re-index "${file.name}".`,
-            )
-            window.setTimeout(() => notice.hide(), 6000)
-          })()
-        }, 5000)
-        this.modifyDebounceMap.set(file.path, id)
+        if (!(file instanceof TFile) || !this.docIndexReady) return
+        if (!this.isWatchedGraphPath(file.path)) return
+        this.scheduleGraphSync(file, 5000)
+      }),
+    )
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        refreshSources()
+        if (!(file instanceof TFile) || !this.docIndexReady) return
+        const pending = this.deferredGraphChanges.get(file.path)
+        if (!this.isWatchedGraphPath(file.path) && !pending) return
+        this.deferredGraphChanges.delete(file.path)
+        this.queueGraphChange({
+          path: pending?.previousPath ?? file.path,
+          remove: true,
+        })
+      }),
+    )
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) => {
+        refreshSources()
+        this.handleGraphRename(file, oldPath)
       }),
     )
 
-    // --- DOCUMENT STATUS CONTEXT MENUS ---
     this.registerEvent(
       this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
-        const syncFolder = this.settings.lightRagSyncFolder.trim()
-        if (!syncFolder || !this.docIndexService) return
-
-        if (file instanceof TFile) {
-          const inFolder =
-            file.path === syncFolder || file.path.startsWith(syncFolder + '/')
-          if (!inFolder) return
-
-          const status = this.docIndexService.getStatus(file.path)
-
-          // Allow reprocessing for any non-processed state, including
-          // 'processing' (stuck from a crashed session) and 'removed'
-          // (user wants to re-add the doc to the graph).
-          if (
-            status === 'failed' ||
-            status === 'unknown' ||
-            status === 'processing' ||
-            status === 'removed'
-          ) {
-            menu.addItem((item) =>
-              item
-                .setTitle('Reprocess document')
-                .setIcon('refresh-cw')
-                .onClick(() => {
-                  void (async () => {
-                    const ragEngine = await this.getRAGEngine()
-                    this.docIndexService!.setProcessing(
-                      file.path,
-                      file.stat.mtime,
-                    )
-                    const ok = await ragEngine.ingestFile(file)
-                    if (!ok) {
-                      this.docIndexService!.setFailed(file.path)
-                    } else {
-                      this.docIndexService!.startPipelineWatch(1000)
-                    }
-                  })()
-                }),
-            )
-          }
-
-          if (status === 'processed') {
-            menu.addItem((item) =>
-              item
-                .setTitle('Remove from graph')
-                .setIcon('trash-2')
-                .onClick(() => {
-                  void (async () => {
-                    const ragEngine = await this.getRAGEngine()
-                    await ragEngine.deleteDocumentByFilePath(
-                      file.path,
-                      file.name,
-                    )
-                    // Mark as 'removed' (blue dot) instead of deleting the entry.
-                    // This preserves the intentional-removal state across restarts
-                    // and prevents auto-reingestion on file-change events.
-                    this.docIndexService!.setRemoved(file.path)
-                  })()
-                }),
-            )
-          }
-        }
-
-        if (file instanceof TFolder && file.path === syncFolder) {
+        if (file instanceof TFolder) {
           menu.addItem((item) =>
             item
-              .setTitle('Reprocess folder')
+              .setTitle('Reprocess with current settings')
               .setIcon('refresh-cw')
               .onClick(() => {
-                void (async () => {
-                  const ragEngine = await this.getRAGEngine()
-                  const files = this.app.vault
-                    .getFiles()
-                    .filter(
-                      (f) =>
-                        (f.path === syncFolder ||
-                          f.path.startsWith(syncFolder + '/')) &&
-                        SUPPORTED_EXTENSIONS.includes(
-                          f.extension.toLowerCase(),
-                        ),
-                    )
-                  let anySubmitted = false
-                  for (const f of files) {
-                    const st = this.docIndexService!.getStatus(f.path)
-                    // Include 'processing' — a doc can be stuck at that
-                    // status from a previous failed/interrupted submission.
-                    if (
-                      st === 'failed' ||
-                      st === 'unknown' ||
-                      st === 'processing'
-                    ) {
-                      this.docIndexService!.setProcessing(f.path, f.stat.mtime)
-                      const ok = await ragEngine.ingestFile(f)
-                      if (!ok) this.docIndexService!.setFailed(f.path)
-                      else anySubmitted = true
-                    }
-                  }
-                  if (anySubmitted) {
-                    this.docIndexService!.startPipelineWatch(1000)
-                  }
-                })()
+                void this.confirmGraphReprocessing(
+                  this.getAllSupportedFiles(file),
+                )
+              }),
+          )
+          return
+        }
+        if (!(file instanceof TFile)) return
+        if (!SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase())) return
+        const record = this.docIndexService?.getRecord(file.path)
+        menu.addItem((item) =>
+          item
+            .setTitle('Reprocess with current settings')
+            .setIcon('refresh-cw')
+            .onClick(() => void this.confirmGraphReprocessing([file])),
+        )
+        if (record?.pending) {
+          menu.addItem((item) =>
+            item
+              .setTitle('Retry failed processing')
+              .setIcon('refresh-cw')
+              .onClick(
+                () => void this.confirmGraphReprocessing([file], 'retry'),
+              ),
+          )
+        }
+        menu.addItem((item) =>
+          item
+            .setTitle('Map existing graph document')
+            .setIcon('link')
+            .onClick(() => void this.mapGraphDocument(file)),
+        )
+        if (record?.status === 'removed') {
+          menu.addItem((item) =>
+            item
+              .setTitle('Re-add to graph')
+              .setIcon('plus')
+              .onClick(
+                () =>
+                  void this.confirmGraphReprocessing([file], 'reprocess', true),
+              ),
+          )
+        } else if (record?.docId) {
+          menu.addItem((item) =>
+            item
+              .setTitle('Remove from graph')
+              .setIcon('trash-2')
+              .onClick(() => {
+                new ConfirmModal(this.app, {
+                  title: 'Remove from graph',
+                  message: `Remove "${file.path}" and its graph contributions? The vault file will be kept.`,
+                  ctaText: 'Remove',
+                  destructive: true,
+                  onConfirm: () =>
+                    this.queueGraphChange({ path: file.path, remove: true }),
+                }).open()
               }),
           )
         }
@@ -868,7 +706,7 @@ export default class NeuralComposerPlugin extends Plugin {
       void this.checkAndUpdateStatus()
 
       // Initialize doc index service + file explorer decoration
-      this.docIndexService = new DocIndexService(this)
+      this.docIndexService ??= new DocIndexService(this)
       this.fileExplorerDecorator = new FileExplorerDecorator()
       this.docIndexService.setUpdateCallback(() => this.decorateFileExplorer())
 
@@ -889,128 +727,38 @@ export default class NeuralComposerPlugin extends Plugin {
 
       // Load persisted index → render immediately, then sync with server
       void (async () => {
-        await this.docIndexService!.load()
-        this.docIndexReady = true // vault events safe to process from here
+        await this.ensureDocIndex()
         this.decorateFileExplorer() // render cached statuses right away
 
         // Give a short delay for the server to be reachable, then sync.
         // We check health first so we don't clobber the cached index when
         // the server is simply offline.
-        window.setTimeout(() => {
-          void (async () => {
-            const online = await this.docIndexService?.isServerOnline()
-            if (online) {
-              await this.docIndexService?.syncFromServer()
-              this.decorateFileExplorer()
-              // Always start pipeline watch after the initial sync:
-              // • If the pipeline is idle → one poll → busy=false → stops immediately
-              // • If docs are processing (from a previous session) → watches until done
-              this.docIndexService?.startPipelineWatch(2000)
-            }
-          })()
-        }, 2000)
-      })()
+        this.timeoutIds.push(
+          window.setTimeout(() => {
+            void (async () => {
+              const online = await this.docIndexService?.isServerOnline()
+              if (online) {
+                await this.docIndexService?.syncFromServer()
+                await this.getRAGEngine()
+                this.decorateFileExplorer()
+                // Always start pipeline watch after the initial sync:
+                // • If the pipeline is idle → one poll → busy=false → stops immediately
+                // • If docs are processing (from a previous session) → watches until done
+                this.docIndexService?.startPipelineWatch(2000)
+              }
+            })().catch((error: unknown) => {
+              new Notice(
+                `Graph recovery paused: ${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
+          }, 2000),
+        )
+      })().catch((error: unknown) => {
+        new Notice(
+          `Document index unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
     })
-  }
-
-  // --- MONITORING LOGIC ---
-  async monitorPipeline(
-    notice: Notice,
-    doneMessage = 'Integrated knowledge!\nThe graph is up to date.',
-  ) {
-    this.updateStatusUI('busy')
-    let isBusy = true
-    let errors = 0
-    // Wait for server to register task
-    await new Promise((r) => window.setTimeout(r, 1000))
-
-    while (isBusy) {
-      try {
-        const response = await requestUrl({
-          url: `${this.settings.lightRagServerUrl}/documents/pipeline_status`,
-          method: 'GET',
-          headers: this.getLightRagHeaders(),
-        })
-
-        type PipelineStatus = {
-          busy: boolean
-          job_name?: string
-          batchs?: number
-          cur_batch?: number
-          latest_message?: string
-        }
-        const status = response.json as PipelineStatus
-        isBusy = status.busy
-
-        if (isBusy) {
-          const total = status.batchs || 1
-          const current = status.cur_batch || 0
-          const percent = Math.round((current / total) * 100)
-          // job_name distinguishes deletion ("Deleting N Documents") from
-          // ingestion so the header reflects what the server is actually doing.
-          const header = status.job_name || 'System processing...'
-
-          notice.setMessage(
-            `${header}\n` +
-              `Progress: ${percent}% (${current}/${total})\n` +
-              `📝 ${status.latest_message || 'Analyzing...'}`,
-          )
-        }
-
-        if (!isBusy) break
-
-        await new Promise((r) => window.setTimeout(r, 1500)) // Polling 1.5s
-      } catch {
-        // Fix: Use empty catch block to avoid unused variable '_' warning
-        errors++
-        if (errors > 3) isBusy = false
-        await new Promise((r) => window.setTimeout(r, 2000))
-      }
-    }
-
-    this.updateStatusUI('online')
-    notice.setMessage(doneMessage)
-    window.setTimeout(() => notice.hide(), 5000)
-  }
-
-  /**
-   * Poll /documents/pipeline_status until the server is idle. Used to serialize
-   * bulk deletes: LightRAG runs one deletion job at a time and drops delete
-   * requests received while it's busy, so callers must wait for each batch to
-   * drain before sending the next. `onBusy` receives the live status on each
-   * poll where the pipeline is busy (for progress UI).
-   */
-  private async waitForPipelineIdle(
-    onBusy?: (status: Record<string, unknown>) => void,
-    maxMs = 60 * 60 * 1000,
-  ): Promise<void> {
-    const start = Date.now()
-    // Grace period so we don't read `busy:false` before the job registers.
-    await new Promise((r) => window.setTimeout(r, 1500))
-    let idleReads = 0
-    let errors = 0
-    while (Date.now() - start < maxMs) {
-      try {
-        const response = await requestUrl({
-          url: `${this.settings.lightRagServerUrl}/documents/pipeline_status`,
-          method: 'GET',
-          headers: this.getLightRagHeaders(),
-          throw: false,
-        })
-        const status = response.json as Record<string, unknown>
-        if (status.busy) {
-          idleReads = 0
-          onBusy?.(status)
-        } else if (++idleReads >= 2) {
-          // Two consecutive idle reads → this batch has finished on the server.
-          return
-        }
-        errors = 0
-      } catch {
-        if (++errors > 5) return
-      }
-      await new Promise((r) => window.setTimeout(r, 2000))
-    }
   }
 
   // --- BATCH LOGIC ---
@@ -1029,65 +777,27 @@ export default class NeuralComposerPlugin extends Plugin {
   }
 
   async batchIngestFolder(folder: TFolder) {
-    const files = this.getAllSupportedFiles(folder).filter(
-      (file) => !this.isPathExcludedFromGraph(file.path),
-    )
-    if (files.length === 0) {
-      new Notice('Empty folder or no supported files.')
-      return
-    }
-
-    const notice = new Notice(
-      `📦 Sending ${files.length} files to system...`,
-      0,
-    )
-
-    try {
-      const ragEngine = await this.getRAGEngine()
-      let successCount = 0
-
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        const ext = file.extension.toLowerCase()
-
-        notice.setMessage(
-          `📦 Sending (${i + 1}/${files.length}):\n📄 ${file.name}`,
-        )
-
-        try {
-          let result = false
-          if (TEXT_BASED_EXTENSIONS.includes(ext)) {
-            const content = await this.app.vault.read(file)
-            const finalContent =
-              ext === 'md' ? `Title: ${file.basename}\n\n${content}` : content
-            result = await ragEngine.insertDocument(finalContent, file.path)
-          } else {
-            result = await ragEngine.uploadDocument(file)
-          }
-
-          if (result) successCount++
-          await new Promise((resolve) => window.setTimeout(resolve, 200))
-        } catch (err) {
-          console.error(`Error processing ${file.name}:`, err)
-        }
-      }
-
-      notice.setMessage(
-        `Uploaded files (${successCount}).\nStart processing...`,
-      )
-      await this.monitorPipeline(notice)
-      void this.refreshIngestedFolderPaths()
-    } catch (error) {
-      console.error('Batch error:', error)
-      notice.setMessage('Error starting upload.')
-      window.setTimeout(() => notice.hide(), 5000)
-    }
+    await this.runGraphBatch(this.getAllSupportedFiles(folder), 'new')
   }
 
   async refreshIngestedFolderPaths(): Promise<void> {
+    const backendId = this.settings.lightRagBackendIdentity
+    const namespace = this.settings.lightRagVaultNamespace
     try {
       const ragEngine = await this.getRAGEngine()
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      )
+        return
       const paths = await ragEngine.listAllDocumentPaths()
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      )
+        return
       const folders = new Set<string>()
       for (const filePath of paths) {
         const normalized = filePath.replace(/\\/g, '/')
@@ -1096,6 +806,12 @@ export default class NeuralComposerPlugin extends Plugin {
           folders.add(parts.slice(0, i).join('/'))
         }
       }
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      )
+        return
       this.ingestedFolderPaths = folders
       this.ingestedFolderPathsLoaded = true
     } catch (e) {
@@ -1113,6 +829,27 @@ export default class NeuralComposerPlugin extends Plugin {
       excludePatterns: this.settings.lightRagExcludePatterns,
       excludeHiddenFiles: this.settings.lightRagExcludeHiddenFiles,
     })
+  }
+
+  private stopGraphSubmissionsForRemoval(paths: string[]): void {
+    if (paths.length === 0) return
+    this.graphBatchAbort?.abort()
+    const selected = new Set(paths)
+    for (const [key, change] of this.deferredGraphChanges) {
+      if (
+        selected.has(change.path) ||
+        (change.previousPath !== undefined && selected.has(change.previousPath))
+      ) {
+        this.deferredGraphChanges.delete(key)
+      }
+    }
+    for (const path of selected) {
+      const timer = this.modifyDebounceMap.get(path)
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        this.modifyDebounceMap.delete(path)
+      }
+    }
   }
 
   private addGraphExclusionMenuItem(menu: Menu, files: TAbstractFile[]) {
@@ -1144,15 +881,8 @@ export default class NeuralComposerPlugin extends Plugin {
     files: TAbstractFile[],
     patterns: string[],
   ) {
-    const merged = Array.from(
-      new Set([...this.settings.lightRagExcludePatterns, ...patterns]),
-    )
-    await this.setSettings({
-      ...this.settings,
-      lightRagExcludePatterns: merged,
-    })
-
-    // Collect all TFile instances (expanding folders)
+    const backendId = this.settings.lightRagBackendIdentity
+    const namespace = this.settings.lightRagVaultNamespace
     const targetFiles: TFile[] = []
     for (const file of files) {
       if (file instanceof TFolder) {
@@ -1161,8 +891,18 @@ export default class NeuralComposerPlugin extends Plugin {
         targetFiles.push(file)
       }
     }
+    const targetPaths = [...new Set(targetFiles.map((file) => file.path))]
+    this.stopGraphSubmissionsForRemoval(targetPaths)
 
-    if (targetFiles.length === 0) {
+    const merged = Array.from(
+      new Set([...this.settings.lightRagExcludePatterns, ...patterns]),
+    )
+    await this.setSettings({
+      ...this.settings,
+      lightRagExcludePatterns: merged,
+    })
+
+    if (targetPaths.length === 0) {
       new Notice('Excluded from graph sync')
       return
     }
@@ -1170,33 +910,36 @@ export default class NeuralComposerPlugin extends Plugin {
     const notice = new Notice('Removing excluded files from graph...', 0)
     try {
       const ragEngine = await this.getRAGEngine()
-
-      // Single pagination pass to build the full id map, then batch-delete.
-      // This avoids O(N) full paginations when excluding a folder with many files.
-      const idMap = await ragEngine.getDocIdMap()
-      const docIds: string[] = []
-      for (const file of targetFiles) {
-        const id = idMap.get(file.path) ?? idMap.get(file.name)
-        if (id) docIds.push(id)
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      ) {
+        throw new Error('Graph ownership changed; removal was not redirected.')
       }
-
-      if (docIds.length > 0) {
-        await ragEngine.deleteDocumentsByIds(docIds)
-        for (const file of targetFiles) {
-          if (idMap.has(file.path) || idMap.has(file.name)) {
-            this.docIndexService?.setRemoved(file.path)
-          }
-        }
+      const removed = await ragEngine.deleteDocumentsByPaths(targetPaths)
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      ) {
+        throw new Error(
+          'Graph ownership changed; removal result was not applied.',
+        )
       }
-
+      if (!removed) {
+        throw new Error(
+          'Removal is unresolved; excluded documents remain paused.',
+        )
+      }
       notice.setMessage(
-        docIds.length > 0
-          ? `Excluded from graph sync (removed ${docIds.length} file${docIds.length === 1 ? '' : 's'} from graph)`
-          : 'Excluded from graph sync',
+        `Excluded from graph sync (removed ${targetPaths.length} file${targetPaths.length === 1 ? '' : 's'} from graph)`,
       )
     } catch (error) {
       console.error('Error removing excluded files from graph:', error)
-      notice.setMessage('Excluded from graph sync (failed to update graph)')
+      notice.setMessage(
+        `Excluded from graph sync (graph removal paused: ${error instanceof Error ? error.message : String(error)})`,
+      )
     } finally {
       window.setTimeout(() => notice.hide(), 4000)
     }
@@ -1212,7 +955,7 @@ export default class NeuralComposerPlugin extends Plugin {
       lightRagExcludePatterns: remaining,
     })
     new Notice(
-      `Re-included in graph sync. Edit the file to re-ingest it, or use "${CMD_INGEST_FOLDER}".`,
+      'Re-included in graph sync. Removed documents stay removed; resolve any paused removal, then use "re-add to graph" for each document you want to add again.',
     )
   }
 
@@ -1229,6 +972,7 @@ export default class NeuralComposerPlugin extends Plugin {
         files.length === 1 ? '' : 's'
       } in "${folder.path}" (and its subfolders) from the ${BACKEND_NAME} graph?\n\nThe files themselves stay in the vault.`,
       ctaText: 'Remove',
+      destructive: true,
       onConfirm: () => {
         void this.executeBatchRemoveFolderFromGraph(folder, files)
       },
@@ -1239,85 +983,48 @@ export default class NeuralComposerPlugin extends Plugin {
     folder: TFolder,
     files: TFile[],
   ) {
-    const notice = new Notice(`Removing ${files.length} files from graph...`, 0)
-    const syncFolder = this.settings.lightRagSyncFolder.trim()
-    const isInWatchedFolder = (path: string) =>
-      !!syncFolder && (path === syncFolder || path.startsWith(syncFolder + '/'))
+    const backendId = this.settings.lightRagBackendIdentity
+    const namespace = this.settings.lightRagVaultNamespace
+    const paths = [...new Set(files.map((file) => file.path))]
+    const notice = new Notice(`Removing ${paths.length} files from graph...`, 0)
+    this.stopGraphSubmissionsForRemoval(paths)
 
     try {
       const ragEngine = await this.getRAGEngine()
-
-      // Resolve every doc_id in ONE pagination pass (the document list spans
-      // multiple pages on large vaults), then delete in batches.
-      notice.setMessage('Looking up documents in graph…')
-      const idMap = await ragEngine.getDocIdMap()
-      const toDelete: { docId: string; path: string }[] = []
-      for (const file of files) {
-        const docId = idMap.get(file.path) ?? idMap.get(file.name)
-        if (docId) toDelete.push({ docId, path: file.path })
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      ) {
+        throw new Error('Graph ownership changed; removal was not redirected.')
       }
-      const missing = files.length - toDelete.length
-      const tail = missing > 0 ? ` (${missing} not in graph)` : ''
-
-      if (toDelete.length === 0) {
-        notice.setMessage(
-          missing > 0
-            ? `Nothing removed — ${missing} file(s) were not in the graph.`
-            : 'Nothing to remove.',
+      notice.setMessage('Settling accepted work before removal…')
+      const removed = await ragEngine.deleteDocumentsByPaths(paths)
+      if (
+        this.graphDisposed ||
+        backendId !== this.settings.lightRagBackendIdentity ||
+        namespace !== this.settings.lightRagVaultNamespace
+      ) {
+        throw new Error(
+          'Graph ownership changed; removal result was not applied.',
         )
-        window.setTimeout(() => notice.hide(), 5000)
-        return
       }
-
-      // Delete in chunks, SEQUENTIALLY. LightRAG runs one deletion job at a
-      // time and drops delete requests received while it's busy, so firing all
-      // chunks at once would only delete the first. We send a chunk, wait for
-      // the server pipeline to drain, then send the next. Deletion is also slow
-      // (the entity graph is reprocessed per document), so we surface live
-      // per-batch progress in the notice.
-      const CHUNK = 100
-      const totalBatches = Math.ceil(toDelete.length / CHUNK)
-      let removed = 0
-      for (let b = 0; b < totalBatches; b++) {
-        const batch = toDelete.slice(b * CHUNK, b * CHUNK + CHUNK)
-        notice.setMessage(
-          `Removing from "${folder.path}"${tail}\n` +
-            `Batch ${b + 1}/${totalBatches} — sending ${batch.length}…`,
-        )
-        const ok = await ragEngine.deleteDocumentsByIds(
-          batch.map((x) => x.docId),
-        )
-        if (ok) {
-          removed += batch.length
-          for (const x of batch) {
-            if (isInWatchedFolder(x.path)) {
-              this.docIndexService?.setRemoved(x.path)
-            }
-          }
-        }
-        this.updateStatusUI('busy')
-        await this.waitForPipelineIdle((status) => {
-          const cur = (status.cur_batch as number) || 0
-          const tot = (status.batchs as number) || batch.length
-          const pct = Math.round((cur / Math.max(tot, 1)) * 100)
-          notice.setMessage(
-            `Removing from "${folder.path}"${tail}\n` +
-              `Batch ${b + 1}/${totalBatches} · ${pct}%\n` +
-              `📝 ${(status.latest_message as string) || 'Processing…'}`,
-          )
-        })
+      if (!removed) {
+        throw new Error('Removal is unresolved; documents remain paused.')
       }
 
       this.updateStatusUI('online')
       notice.setMessage(
-        `Removed ${removed} from "${folder.path}"${tail}.\nReopen the graph view to refresh.`,
+        `Removed ${paths.length} from "${folder.path}".\nReopen the graph view to refresh.`,
       )
       window.setTimeout(() => notice.hide(), 6000)
       void this.refreshIngestedFolderPaths()
       this.decorateFileExplorer()
     } catch (error) {
       console.error('Batch remove error:', error)
-      notice.setMessage('Error removing files from graph.')
+      notice.setMessage(
+        `Folder removal paused: ${error instanceof Error ? error.message : String(error)}`,
+      )
       window.setTimeout(() => notice.hide(), 5000)
     }
   }
@@ -1325,6 +1032,9 @@ export default class NeuralComposerPlugin extends Plugin {
   // --- LIFECYCLE & SERVER MANAGEMENT ---
 
   onunload() {
+    this.graphDisposed = true
+    this.graphBatchAbort?.abort()
+    this.deferredGraphChanges.clear()
     this.modelCatalog?.dispose()
     window.clearInterval(this.heartbeatInterval)
     this.timeoutIds.forEach((id) => window.clearTimeout(id))
@@ -1339,6 +1049,7 @@ export default class NeuralComposerPlugin extends Plugin {
 
     // Reset promises so they can be re-initialized if plugin is re-enabled without full reload
     this.dbManagerInitPromise = null
+    this.docIndexLoadPromise = null
     this.ragEngineInitPromise = null
 
     if (this.dbManager) {
@@ -1388,30 +1099,38 @@ export default class NeuralComposerPlugin extends Plugin {
       this.updateStatusUI('offline')
       return
     }
-    if (this.serverProcess) {
-      this.serverProcess.kill()
-      this.serverProcess = null
+    const child = this.serverProcess
+    if (!child) {
+      this.updateStatusUI('offline')
+      return
     }
+    this.serverProcess = null
+
+    let terminated = false
     try {
-      if (this._nodeChildProcess && typeof process !== 'undefined') {
+      if (typeof process !== 'undefined') {
         if (process.platform === 'win32') {
-          this._nodeChildProcess.execSync(
-            'taskkill /F /IM lightrag-server.exe /T',
-            { stdio: 'ignore' },
-          )
+          if (this._nodeChildProcess) {
+            this._nodeChildProcess.execSync(
+              `taskkill /PID ${child.pid} /T /F`,
+              { stdio: 'ignore' },
+            )
+            terminated = true
+          }
         } else {
-          // macOS / Linux: kill whatever is listening on the server port.
-          // This handles orphaned processes started outside the plugin (e.g.
-          // manually, or from a previous Obsidian session).
-          const port = this.getServerPort()
-          this._nodeChildProcess.execSync(
-            `bash -c "lsof -ti tcp:${port} | xargs kill -9 2>/dev/null || true"`,
-            { stdio: 'ignore' },
-          )
+          process.kill(-child.pid, 'SIGTERM')
+          terminated = true
         }
       }
     } catch {
-      // Ignore kill errors if process not found
+      // Fall back to the exact owned handle below.
+    }
+    if (!terminated) {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // The owned process already exited.
+      }
     }
     this.updateStatusUI('offline')
   }
@@ -1428,8 +1147,7 @@ export default class NeuralComposerPlugin extends Plugin {
     // Use timeout to allow process to fully die
     this.timeoutIds.push(
       window.setTimeout(() => {
-        if (!skipEnvUpdate) this.updateEnvFile()
-        void this.startLightRagServer()
+        void this.startLightRagServer(skipEnvUpdate)
       }, 2000),
     )
   }
@@ -1519,13 +1237,30 @@ export default class NeuralComposerPlugin extends Plugin {
             LIGHTRAG_BINDING_MAP[llmProvider.id] ?? llmProvider.id
           envContent += `LLM_BINDING=${llmBindingName}\n`
 
-          if (llmProvider.id === 'ollama' && llmProvider.baseUrl) {
-            envContent += `OLLAMA_HOST=${llmProvider.baseUrl}\n`
-          } else if (llmProvider.baseUrl) {
-            envContent += `LLM_BINDING_HOST=${this.normalizeBindingHost(llmProvider.baseUrl)}\n`
-          }
-          if (llmProvider.apiKey) {
-            envContent += `LLM_BINDING_API_KEY=${llmProvider.apiKey}\n`
+          const configuredNativeLlmHost = llmProvider.baseUrl?.trim()
+          const resolvedNativeLlmHost =
+            configuredNativeLlmHost ||
+            NATIVE_PROVIDER_DEFAULT_HOSTS[llmProvider.id]
+          if (!resolvedNativeLlmHost) {
+            if (
+              !hasExplicitEnvValue(
+                this.settings.lightRagCustomEnv,
+                'LLM_BINDING_HOST',
+              )
+            ) {
+              throw new Error(
+                `No LightRAG host is available for provider "${llmProvider.id}".`,
+              )
+            }
+          } else if (llmProvider.id === 'ollama') {
+            const ollamaHost = resolvedNativeLlmHost.replace(/\/+$/, '')
+            envContent += `OLLAMA_HOST=${ollamaHost}\n`
+            envContent += `LLM_BINDING_HOST=${ollamaHost}\n`
+          } else {
+            const normalizedLlmHost = configuredNativeLlmHost
+              ? this.normalizeBindingHost(configuredNativeLlmHost)
+              : resolvedNativeLlmHost
+            envContent += `LLM_BINDING_HOST=${normalizedLlmHost}\n`
           }
         } else {
           // Custom provider: use openai-compatible binding.
@@ -1533,28 +1268,28 @@ export default class NeuralComposerPlugin extends Plugin {
           // have an explicit baseUrl stored (e.g. openrouter added before this
           // field was required). Without this, LightRAG silently falls back to
           // api.openai.com and rejects non-OpenAI keys with a 401 error.
-          const KNOWN_PROVIDER_BASE_URLS: Record<string, string> = {
-            openrouter: 'https://openrouter.ai/api/v1',
-            groq: 'https://api.groq.com/openai/v1',
-            deepseek: 'https://api.deepseek.com',
-            mistral: 'https://api.mistral.ai/v1',
-            perplexity: 'https://api.perplexity.ai',
-            morph: 'https://api.morph.so/v1',
-            'lm-studio': 'http://localhost:1234/v1',
-          }
           envContent += `LLM_BINDING=openai\n`
           const resolvedLlmBaseUrl =
-            llmProvider.baseUrl ||
+            llmProvider.baseUrl?.trim() ||
             KNOWN_PROVIDER_BASE_URLS[llmProvider.id] ||
             KNOWN_PROVIDER_BASE_URLS[llmProvider.type]
-          if (resolvedLlmBaseUrl) {
+          if (!resolvedLlmBaseUrl) {
+            if (
+              !hasExplicitEnvValue(
+                this.settings.lightRagCustomEnv,
+                'LLM_BINDING_HOST',
+              )
+            ) {
+              throw new Error(
+                `No LightRAG host is available for provider "${llmProvider.id}".`,
+              )
+            }
+          } else {
             envContent += `LLM_BINDING_HOST=${this.normalizeBindingHost(resolvedLlmBaseUrl)}\n`
-          }
-          if (llmProvider.apiKey) {
-            envContent += `LLM_BINDING_API_KEY=${llmProvider.apiKey}\n`
           }
         }
 
+        envContent += `LLM_BINDING_API_KEY=${llmProvider.apiKey ?? ''}\n`
         envContent += `LLM_MODEL=${llmModelObj.model}\n`
       }
 
@@ -1580,47 +1315,55 @@ export default class NeuralComposerPlugin extends Plugin {
           // as a fallback instead of using a proper Ollama default. When LLM_BINDING_HOST
           // is set to a remote provider (e.g. OpenRouter), Ollama embedding silently routes
           // there and gets 404s. Always write EMBEDDING_BINDING_HOST explicitly to prevent this.
-          const NATIVE_EMBED_DEFAULT_HOSTS: Record<string, string> = {
-            ollama: 'http://localhost:11434',
-          }
+          const configuredNativeEmbedHost = embedProvider.baseUrl?.trim()
           const resolvedNativeEmbedHost =
-            embedProvider.baseUrl ||
-            NATIVE_EMBED_DEFAULT_HOSTS[embedProvider.id]
-          if (resolvedNativeEmbedHost) {
+            configuredNativeEmbedHost ||
+            NATIVE_PROVIDER_DEFAULT_HOSTS[embedProvider.id]
+          if (!resolvedNativeEmbedHost) {
+            if (
+              !hasExplicitEnvValue(
+                this.settings.lightRagCustomEnv,
+                'EMBEDDING_BINDING_HOST',
+              )
+            ) {
+              throw new Error(
+                `No LightRAG host is available for provider "${embedProvider.id}".`,
+              )
+            }
+          } else {
             // Ollama uses its own /api/* paths — do NOT append /v1
             const normalizedEmbedHost =
               embedProvider.id === 'ollama'
                 ? resolvedNativeEmbedHost.replace(/\/+$/, '')
-                : this.normalizeBindingHost(resolvedNativeEmbedHost)
+                : configuredNativeEmbedHost
+                  ? this.normalizeBindingHost(configuredNativeEmbedHost)
+                  : resolvedNativeEmbedHost
             envContent += `EMBEDDING_BINDING_HOST=${normalizedEmbedHost}\n`
-          }
-          if (embedProvider.apiKey) {
-            envContent += `EMBEDDING_BINDING_API_KEY=${embedProvider.apiKey}\n`
           }
         } else {
           // Custom provider: use openai-compatible binding with fallback base URL.
-          const KNOWN_EMBED_BASE_URLS: Record<string, string> = {
-            openrouter: 'https://openrouter.ai/api/v1',
-            groq: 'https://api.groq.com/openai/v1',
-            deepseek: 'https://api.deepseek.com',
-            mistral: 'https://api.mistral.ai/v1',
-            perplexity: 'https://api.perplexity.ai',
-            morph: 'https://api.morph.so/v1',
-            'lm-studio': 'http://localhost:1234/v1',
-          }
           envContent += `EMBEDDING_BINDING=openai\n`
           const resolvedEmbedBaseUrl =
-            embedProvider.baseUrl ||
-            KNOWN_EMBED_BASE_URLS[embedProvider.id] ||
-            KNOWN_EMBED_BASE_URLS[embedProvider.type]
-          if (resolvedEmbedBaseUrl) {
+            embedProvider.baseUrl?.trim() ||
+            KNOWN_PROVIDER_BASE_URLS[embedProvider.id] ||
+            KNOWN_PROVIDER_BASE_URLS[embedProvider.type]
+          if (!resolvedEmbedBaseUrl) {
+            if (
+              !hasExplicitEnvValue(
+                this.settings.lightRagCustomEnv,
+                'EMBEDDING_BINDING_HOST',
+              )
+            ) {
+              throw new Error(
+                `No LightRAG host is available for provider "${embedProvider.id}".`,
+              )
+            }
+          } else {
             envContent += `EMBEDDING_BINDING_HOST=${this.normalizeBindingHost(resolvedEmbedBaseUrl)}\n`
-          }
-          if (embedProvider.apiKey) {
-            envContent += `EMBEDDING_BINDING_API_KEY=${embedProvider.apiKey}\n`
           }
         }
 
+        envContent += `EMBEDDING_BINDING_API_KEY=${embedProvider.apiKey ?? ''}\n`
         envContent += `EMBEDDING_MODEL=${embedModelObj.model}\n`
         envContent += `EMBEDDING_DIM=${embedModelObj.dimension || 1024}\n`
         envContent += `MAX_TOKEN_SIZE=8192\n`
@@ -1658,16 +1401,15 @@ export default class NeuralComposerPlugin extends Plugin {
       const providersNeeded = new Set([llmProvider, embedProvider])
       envContent += `\n# API Keys\n`
       let openAiKeyWritten = false
-      providersNeeded.forEach((p) => {
-        if (p && p.apiKey) {
-          const keyName = p.id.toUpperCase()
-          if (keyName === 'GEMINI') envContent += `GEMINI_API_KEY=${p.apiKey}\n`
-          if (keyName === 'OPENAI') {
-            envContent += `OPENAI_API_KEY=${p.apiKey}\n`
-            openAiKeyWritten = true
-          }
-          if (keyName === 'ANTHROPIC')
-            envContent += `ANTHROPIC_API_KEY=${p.apiKey}\n`
+      providersNeeded.forEach((provider) => {
+        if (!provider) return
+        if (provider.id === 'gemini')
+          envContent += `GEMINI_API_KEY=${provider.apiKey ?? ''}\n`
+        if (provider.id === 'anthropic')
+          envContent += `ANTHROPIC_API_KEY=${provider.apiKey ?? ''}\n`
+        if (provider.id === 'openai' && provider.apiKey) {
+          envContent += `OPENAI_API_KEY=${provider.apiKey}\n`
+          openAiKeyWritten = true
         }
       })
       // Providers that use LightRAG's "openai" binding (e.g. LM Studio,
@@ -1709,32 +1451,230 @@ export default class NeuralComposerPlugin extends Plugin {
     }
   }
 
-  public saveEnvAndRestart(content: string) {
-    if (!Platform.isDesktop || !this._nodeFs || !this._nodePath) return
+  private readEnvFileSource(): EnvFileSource {
+    if (!Platform.isDesktop || !this._nodeFs || !this._nodePath)
+      throw new Error('Local server configuration is unavailable.')
     const workDir = this.settings.lightRagWorkDir
-    if (!workDir) return
-
-    try {
-      const envPath = this._nodePath.join(workDir, '.env')
-      this._nodeFs.writeFileSync(envPath, content)
-      // skipEnvUpdate=true so the manually-edited content is not overwritten
-      this.restartLightRagServer(true)
-    } catch (e) {
-      new Notice('Error saving .env file')
-      console.error(e)
+    if (!workDir) throw new Error('Configure a local server directory first.')
+    const envPath = this._nodePath.join(workDir, '.env')
+    const originalExists = this._nodeFs.existsSync(envPath)
+    return {
+      backendIdentity: this.settings.lightRagBackendIdentity,
+      envPath,
+      originalContent: originalExists
+        ? this._nodeFs.readFileSync(envPath, 'utf8')
+        : '',
+      originalExists,
     }
   }
 
-  public updateEnvFile(): boolean {
+  private isEnvEditorSnapshotCurrent(
+    snapshot: Pick<EnvEditorSnapshot, 'backendIdentity' | 'envPath'>,
+  ): boolean {
     if (!Platform.isDesktop || !this._nodeFs || !this._nodePath) return false
-    const content = this.generateEnvConfig()
     const workDir = this.settings.lightRagWorkDir
-    if (workDir && content) {
-      const envPath = this._nodePath.join(workDir, '.env')
-      this._nodeFs.writeFileSync(envPath, content)
-      return true
+    return (
+      Boolean(workDir) &&
+      snapshot.backendIdentity === this.settings.lightRagBackendIdentity &&
+      snapshot.envPath === this._nodePath.join(workDir, '.env')
+    )
+  }
+
+  private prepareEnvEditorSnapshot(
+    source = this.readEnvFileSource(),
+  ): EnvEditorSnapshot {
+    if (!this.isEnvEditorSnapshotCurrent(source))
+      throw new Error('Server connection changed; configuration was not read.')
+    const generated = this.generateEnvConfig()
+    if (!generated) throw new Error('Server configuration is unavailable.')
+    const content = this.mergeGeneratedEnv(source.originalContent, generated)
+    if (content === null)
+      throw new Error('Managed environment markers are malformed or ambiguous.')
+    return { ...source, content }
+  }
+
+  public loadEnvEditorSnapshot(): EnvEditorSnapshot | null {
+    try {
+      return this.prepareEnvEditorSnapshot()
+    } catch (error) {
+      console.error('Error preparing .env file:', error)
+      new Notice(
+        'Server configuration could not be opened; original file was kept.',
+      )
+      return null
     }
-    return false
+  }
+
+  public async saveEnvAndRestart(
+    content: string,
+    snapshot: EnvEditorSnapshot,
+  ): Promise<boolean> {
+    if (!this.isEnvEditorSnapshotCurrent(snapshot)) {
+      new Notice('Server configuration changed; reopen it before saving.')
+      return false
+    }
+    if (this.mergeGeneratedEnv(content, '') === null) {
+      new Notice('Server configuration update failed; original file was kept.')
+      return false
+    }
+
+    try {
+      await this.setSettings({
+        ...this.settings,
+        lightRagImageDownloadsDisabledFor: '',
+      })
+      if (!this.isEnvEditorSnapshotCurrent(snapshot)) {
+        new Notice('Server configuration changed; reopen it before saving.')
+        return false
+      }
+      this.writeEnvFileVerified(
+        snapshot.envPath,
+        snapshot.originalContent,
+        content,
+        snapshot.originalExists,
+      )
+      if (!this.isEnvEditorSnapshotCurrent(snapshot)) {
+        new Notice('Server configuration changed; restart was cancelled.')
+        return false
+      }
+      this.restartLightRagServer(true)
+      return true
+    } catch (error) {
+      new Notice('Error saving .env file')
+      console.error(error)
+      return false
+    }
+  }
+
+  private findEnvMarkerLines(
+    content: string,
+    marker: string,
+  ): { start: number; end: number }[] {
+    const matches: { start: number; end: number }[] = []
+    let start = 0
+    while (start <= content.length) {
+      const newline = content.indexOf('\n', start)
+      const end = newline === -1 ? content.length : newline
+      const lineEnd = end > start && content[end - 1] === '\r' ? end - 1 : end
+      if (content.slice(start, lineEnd) === marker) {
+        matches.push({ start, end: lineEnd })
+      }
+      if (newline === -1) break
+      start = newline + 1
+    }
+    return matches
+  }
+
+  private mergeGeneratedEnv(
+    existing: string,
+    generated: string,
+  ): string | null {
+    if (
+      this.findEnvMarkerLines(generated, MANAGED_ENV_BEGIN).length > 0 ||
+      this.findEnvMarkerLines(generated, MANAGED_ENV_END).length > 0
+    ) {
+      return null
+    }
+    const begins = this.findEnvMarkerLines(existing, MANAGED_ENV_BEGIN)
+    const ends = this.findEnvMarkerLines(existing, MANAGED_ENV_END)
+    if (
+      begins.length !== ends.length ||
+      begins.length > 1 ||
+      (begins.length === 1 && begins[0].start >= ends[0].start)
+    ) {
+      return null
+    }
+
+    const newline = existing.includes('\r\n') ? '\r\n' : '\n'
+    const generatedBody = generated
+      .replace(/\r\n?/g, '\n')
+      .replace(/\n+$/, '')
+      .replace(/\n/g, newline)
+    const managed = `${MANAGED_ENV_BEGIN}${newline}${generatedBody}${newline}${MANAGED_ENV_END}`
+    if (begins.length === 1) {
+      return (
+        existing.slice(0, begins[0].start) +
+        managed +
+        existing.slice(ends[0].end)
+      )
+    }
+
+    const separator =
+      existing.length === 0
+        ? ''
+        : existing.endsWith('\n')
+          ? newline
+          : `${newline}${newline}`
+    return `${existing}${separator}${managed}${newline}`
+  }
+
+  private writeEnvFileVerified(
+    envPath: string,
+    previous: string,
+    content: string,
+    previousExists: boolean,
+  ): void {
+    if (!this._nodeFs) return
+    if (content === previous) {
+      if (
+        this._nodeFs.existsSync(envPath) !== previousExists ||
+        (previousExists &&
+          this._nodeFs.readFileSync(envPath, 'utf8') !== previous)
+      )
+        throw new Error(
+          'Server configuration changed externally; original file was kept.',
+        )
+      return
+    }
+    const temporaryPath = `${envPath}.${uuidv4()}.tmp`
+    const backupPath = `${temporaryPath}.bak`
+    this._nodeFs.writeFileSync(temporaryPath, content, { mode: 0o600 })
+    if (this._nodeFs.readFileSync(temporaryPath, 'utf8') !== content)
+      throw new Error(
+        'Could not verify the new configuration; original file was kept.',
+      )
+    if (previousExists) {
+      this._nodeFs.writeFileSync(backupPath, previous, { mode: 0o600 })
+      if (this._nodeFs.readFileSync(backupPath, 'utf8') !== previous)
+        throw new Error(
+          'Could not verify the configuration backup; original file was kept.',
+        )
+    }
+    if (
+      this._nodeFs.existsSync(envPath) !== previousExists ||
+      (previousExists &&
+        this._nodeFs.readFileSync(envPath, 'utf8') !== previous)
+    )
+      throw new Error(
+        'Server configuration changed externally; original file was kept.',
+      )
+    this._nodeFs.renameSync(temporaryPath, envPath)
+    if (this._nodeFs.readFileSync(envPath, 'utf8') !== content) {
+      const recovery = previousExists ? ` Recovery copy: ${backupPath}` : ''
+      throw new Error(`Could not verify the updated configuration.${recovery}`)
+    }
+    if (previousExists) this._nodeFs.unlinkSync(backupPath)
+  }
+
+  public updateEnvFile(): boolean {
+    try {
+      const snapshot = this.prepareEnvEditorSnapshot()
+      if (!this.isEnvEditorSnapshotCurrent(snapshot))
+        throw new Error(
+          'Server connection changed; configuration was not replaced.',
+        )
+      this.writeEnvFileVerified(
+        snapshot.envPath,
+        snapshot.originalContent,
+        snapshot.content,
+        snapshot.originalExists,
+      )
+      return true
+    } catch (error) {
+      console.error('Error updating .env file:', error)
+      new Notice('Server configuration update failed; original file was kept.')
+      return false
+    }
   }
 
   public async reprocessFailedDocuments(): Promise<void> {
@@ -1782,7 +1722,7 @@ export default class NeuralComposerPlugin extends Plugin {
     })
   }
 
-  async startLightRagServer() {
+  async startLightRagServer(skipEnvUpdate = false) {
     if (!Platform.isDesktop) {
       new Notice(
         'Local server is not supported on mobile. Configure a remote server in settings.',
@@ -1802,7 +1742,7 @@ export default class NeuralComposerPlugin extends Plugin {
       return
     }
 
-    if (!this.updateEnvFile()) return
+    if (!skipEnvUpdate && !this.updateEnvFile()) return
 
     const isAlive = await this.isPortInUse(this.getServerPort())
     if (isAlive) {
@@ -1830,7 +1770,7 @@ export default class NeuralComposerPlugin extends Plugin {
       // ------------------------------------------------
 
       // Usamos las variables sanitizadas en el comando y argumentos
-      this.serverProcess = this._nodeChildProcess!.spawn(
+      const child = this._nodeChildProcess!.spawn(
         safeCommand,
         [
           '--port',
@@ -1841,13 +1781,17 @@ export default class NeuralComposerPlugin extends Plugin {
           '1',
         ],
         {
+          detached:
+            typeof process !== 'undefined' && process.platform !== 'win32',
           cwd: workDir, // cwd usa la ruta original (Node la maneja bien)
           shell: true,
           env: { ...envVars, PYTHONIOENCODING: 'utf-8', FORCE_COLOR: '1' },
         },
       )
+      this.serverProcess = child
 
-      this.serverProcess.stderr?.on('data', (data: BufferLike | string) => {
+      child.stderr?.on('data', (data: BufferLike | string) => {
+        if (this.serverProcess !== child) return
         const msg = String(data)
         const now = Date.now()
 
@@ -1889,8 +1833,15 @@ export default class NeuralComposerPlugin extends Plugin {
         }
       })
 
-      this.serverProcess.on('close', (_code) => {
+      child.on('close', (_code) => {
+        if (this.serverProcess !== child) return
         this.serverProcess = null
+        this.updateStatusUI('offline')
+      })
+      child.on('error', (error) => {
+        if (this.serverProcess !== child) return
+        this.serverProcess = null
+        console.error('LightRAG server process error:', error)
         this.updateStatusUI('offline')
       })
 
@@ -1898,13 +1849,16 @@ export default class NeuralComposerPlugin extends Plugin {
       void (async () => {
         for (let i = 0; i < 15; i++) {
           await new Promise((r) => window.setTimeout(r, 1000))
+          if (this.serverProcess !== child) return
           const alive = await this.isPortInUse(this.getServerPort())
+          if (this.serverProcess !== child) return
           if (alive) {
             this.updateStatusUI('online')
             new Notice(`${BACKEND_NAME} activated`)
             return
           }
         }
+        if (this.serverProcess !== child) return
         this.updateStatusUI('offline')
         new Notice('Server failed to respond in time.')
       })()
@@ -1917,10 +1871,16 @@ export default class NeuralComposerPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = parseNeuralComposerSettings(await this.loadData())
+    this.settings.lightRagVaultNamespace ||= uuidv4()
+    this.settings.lightRagBackendIdentity ||= uuidv4()
     // Mobile cannot spawn a local LightRAG server (no child_process / fs).
     // Force remote-server mode on so the rest of the plugin treats the backend
     // as remote-only and never tries to auto-start or shell out.
     if (!Platform.isDesktop) {
+      if (!this.settings.lightRagUseRemote) {
+        this.settings.lightRagBackendIdentity = uuidv4()
+        this.settings.lightRagImageDownloadsDisabledFor = ''
+      }
       this.settings.lightRagUseRemote = true
       this.settings.enableAutoStartServer = false
     }
@@ -1933,15 +1893,458 @@ export default class NeuralComposerPlugin extends Plugin {
       new Notice('Invalid settings')
       return
     }
-    // If switching to remote mode, stop any running local server
-    if (newSettings.lightRagUseRemote && !this.settings.lightRagUseRemote) {
-      this.stopLightRagServer()
-      void this.checkAndUpdateStatus()
+    const connectionChanged =
+      newSettings.lightRagServerUrl !== this.settings.lightRagServerUrl ||
+      newSettings.lightRagApiKey !== this.settings.lightRagApiKey ||
+      newSettings.lightRagUseRemote !== this.settings.lightRagUseRemote ||
+      newSettings.lightRagWorkDir !== this.settings.lightRagWorkDir
+    if (connectionChanged) {
+      newSettings = {
+        ...newSettings,
+        lightRagBackendIdentity: uuidv4(),
+        lightRagImageDownloadsDisabledFor: '',
+      }
+    } else if (
+      newSettings.lightRagCustomEnv !== this.settings.lightRagCustomEnv
+    ) {
+      newSettings = { ...newSettings, lightRagImageDownloadsDisabledFor: '' }
     }
-    this.settings = newSettings
+    const ownershipChanged =
+      newSettings.lightRagBackendIdentity !==
+      this.settings.lightRagBackendIdentity
+    if (ownershipChanged) {
+      this.graphBatchAbort?.abort()
+      this.deferredGraphChanges.clear()
+      this.modifyDebounceMap.forEach((id) => window.clearTimeout(id))
+      this.modifyDebounceMap.clear()
+    }
     await this.saveData(newSettings)
+    if (newSettings.lightRagUseRemote && !this.settings.lightRagUseRemote)
+      this.stopLightRagServer()
+    this.settings = newSettings
     this.ragEngine?.setSettings(newSettings)
+    if (ownershipChanged) {
+      this.ingestedFolderPaths.clear()
+      this.ingestedFolderPathsLoaded = false
+      this.setServerVersion(null)
+      void this.docIndexService
+        ?.rebuildSourceMap()
+        .catch((error: unknown) =>
+          console.error('Document source reconciliation failed', error),
+        )
+    }
     this.settingsChangeListeners.forEach((listener) => listener(newSettings))
+  }
+
+  public async invalidateParagraphBackend(): Promise<void> {
+    await this.setSettings({
+      ...this.settings,
+      lightRagBackendIdentity: uuidv4(),
+      lightRagImageDownloadsDisabledFor: '',
+    })
+  }
+
+  public async configureParagraphPrivacy(): Promise<void> {
+    if (!Platform.isDesktop || this.isRemoteServer())
+      throw new Error('Configure image downloading on the remote server.')
+    const source = this.readEnvFileSource()
+    if (this.mergeGeneratedEnv(source.originalContent, '') === null)
+      throw new Error(
+        'Managed environment markers are malformed or ambiguous; original file was kept.',
+      )
+    const privacyOverride = 'NATIVE_MD_IMAGE_DOWNLOAD_ENABLED=false'
+    const customEnv = this.settings.lightRagCustomEnv.trimEnd()
+    await this.setSettings({
+      ...this.settings,
+      lightRagCustomEnv: customEnv.endsWith(privacyOverride)
+        ? `${customEnv}\n`
+        : `${customEnv}${customEnv ? '\n' : ''}${privacyOverride}\n`,
+      lightRagImageDownloadsDisabledFor: '',
+    })
+    if (!this.isEnvEditorSnapshotCurrent(source))
+      throw new Error(
+        'Server connection changed; configuration was not replaced.',
+      )
+    const snapshot = this.prepareEnvEditorSnapshot(source)
+    if (!this.isEnvEditorSnapshotCurrent(snapshot))
+      throw new Error(
+        'Server connection changed; configuration was not replaced.',
+      )
+    this.writeEnvFileVerified(
+      snapshot.envPath,
+      snapshot.originalContent,
+      snapshot.content,
+      snapshot.originalExists,
+    )
+    if (!this.isEnvEditorSnapshotCurrent(snapshot))
+      throw new Error(
+        'Server connection changed; configuration was not restarted.',
+      )
+    this.restartLightRagServer(true)
+    new Notice(
+      'Image downloads disabled in configuration. After restart, confirm the running server setting in document processing.',
+    )
+  }
+
+  private ensureDocIndex(): Promise<DocIndexService> {
+    if (!this.docIndexLoadPromise) {
+      const index = (this.docIndexService ??= new DocIndexService(this))
+      this.docIndexLoadPromise = index.load().then(() => {
+        if (this.graphDisposed) throw new Error('Plugin unloaded')
+        this.docIndexReady = true
+        return index
+      })
+    }
+    return this.docIndexLoadPromise
+  }
+
+  private isWatchedGraphPath(path: string): boolean {
+    const folder = this.settings.lightRagSyncFolder.trim().replace(/\/+$/, '')
+    return Boolean(folder && (path === folder || path.startsWith(`${folder}/`)))
+  }
+
+  private handleGraphRename(file: TAbstractFile, oldPath: string): void {
+    // Folder callbacks still contain stale child paths; Obsidian then emits each file's rename.
+    if (!(file instanceof TFile) || !this.docIndexReady) return
+    const previous = this.deferredGraphChanges.get(oldPath)
+    this.deferredGraphChanges.delete(oldPath)
+    const originalPath = previous?.previousPath ?? oldPath
+    const wasWatched = this.isWatchedGraphPath(originalPath)
+    const isWatched = this.isWatchedGraphPath(file.path)
+    if (!wasWatched && !isWatched) return
+    if (!isWatched || this.isPathExcludedFromGraph(file.path)) {
+      if (wasWatched)
+        this.queueGraphChange({ path: originalPath, remove: true })
+      return
+    }
+    this.queueGraphChange({
+      path: file.path,
+      previousPath: wasWatched ? originalPath : undefined,
+      remove: false,
+    })
+  }
+
+  private scheduleGraphSync(file: TFile, delay: number): void {
+    if (
+      !SUPPORTED_EXTENSIONS.includes(file.extension.toLowerCase()) ||
+      this.isPathExcludedFromGraph(file.path)
+    )
+      return
+    const previous = this.modifyDebounceMap.get(file.path)
+    if (previous) window.clearTimeout(previous)
+    const path = file.path
+    const timer = window.setTimeout(() => {
+      this.modifyDebounceMap.delete(path)
+      this.queueGraphChange({ path, remove: false })
+    }, delay)
+    this.modifyDebounceMap.set(path, timer)
+  }
+
+  private queueGraphChange(change: {
+    path: string
+    previousPath?: string
+    remove: boolean
+  }): void {
+    if (this.graphDisposed) return
+    if (change.remove) {
+      const timer = this.modifyDebounceMap.get(change.path)
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        this.modifyDebounceMap.delete(change.path)
+      }
+      const backendId = this.settings.lightRagBackendIdentity
+      const namespace = this.settings.lightRagVaultNamespace
+      const removal = (async () => {
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        const engine = await this.getRAGEngine()
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        const removed = await engine.deleteDocumentsByPaths([change.path])
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        if (!removed) new Notice(`Graph removal paused: ${change.path}`)
+      })().catch((error: unknown) => {
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        new Notice(
+          `Graph removal paused: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+      this.graphSyncTail = this.graphSyncTail.then(() => removal)
+      return
+    }
+    if (this.graphBatchAbort) {
+      const previous = this.deferredGraphChanges.get(change.path)
+      this.deferredGraphChanges.set(change.path, {
+        ...change,
+        previousPath: previous?.previousPath ?? change.previousPath,
+      })
+      return
+    }
+    const backendId = this.settings.lightRagBackendIdentity
+    const namespace = this.settings.lightRagVaultNamespace
+    this.graphSyncTail = this.graphSyncTail
+      .then(async () => {
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        if (this.graphBatchAbort) {
+          this.queueGraphChange(change)
+          return
+        }
+        const engine = await this.getRAGEngine()
+        const index = await this.ensureDocIndex()
+        if (
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity ||
+          namespace !== this.settings.lightRagVaultNamespace
+        )
+          return
+        const file = this.app.vault.getAbstractFileByPath(change.path)
+        if (
+          !(file instanceof TFile) ||
+          !this.isWatchedGraphPath(file.path) ||
+          this.isPathExcludedFromGraph(file.path)
+        )
+          return
+        if (
+          !change.previousPath &&
+          !index.needsIngestion(file.path, file.stat.mtime)
+        )
+          return
+        const previousRecord = change.previousPath
+          ? index.getRecord(change.previousPath, backendId)
+          : undefined
+        if (
+          change.previousPath &&
+          previousRecord &&
+          (previousRecord.status === 'removed' ||
+            previousRecord.removeRequested)
+        ) {
+          if (previousRecord.status === 'removed') {
+            const source = await documentSourceName(namespace, file.path)
+            if (
+              this.graphDisposed ||
+              backendId !== this.settings.lightRagBackendIdentity ||
+              namespace !== this.settings.lightRagVaultNamespace
+            )
+              return
+            await index.saveRecord(
+              file.path,
+              {
+                ...previousRecord,
+                source,
+                pending: undefined,
+                aliases: [
+                  ...new Set([
+                    ...(previousRecord.aliases ?? []),
+                    ...(previousRecord.source ? [previousRecord.source] : []),
+                  ]),
+                ],
+              },
+              backendId,
+              { previousPath: change.previousPath },
+            )
+          } else {
+            await index.saveRecord(file.path, previousRecord, backendId, {
+              previousPath: change.previousPath,
+            })
+          }
+          return
+        }
+        const result = await engine.ingestFile(file, {
+          intent: 'sync',
+          previousPath: change.previousPath,
+        })
+        if (result.status === 'failed' || result.status === 'paused')
+          new Notice(
+            result.message ?? `Graph synchronization paused: ${file.path}`,
+          )
+        this.decorateFileExplorer()
+      })
+      .catch((error: unknown) => {
+        new Notice(
+          `Graph synchronization paused: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+  }
+
+  private async mapGraphDocument(file: TFile): Promise<void> {
+    try {
+      const backendId = this.settings.lightRagBackendIdentity
+      const engine = await this.getRAGEngine()
+      const candidates = await engine.listDocumentCandidates(file)
+      new GraphDocumentMappingModal(
+        this.app,
+        file.path,
+        candidates,
+        async (docId) => {
+          if (backendId !== this.settings.lightRagBackendIdentity) {
+            throw new Error('Backend changed; reopen document mapping.')
+          }
+          await engine.bindDocument(file, docId)
+          new Notice(
+            'Document mapped. Reprocess with current settings to adopt a processing policy.',
+          )
+        },
+      ).open()
+    } catch (error) {
+      new Notice(
+        `Document mapping unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  private async confirmGraphReprocessing(
+    files: TFile[],
+    intent: 'reprocess' | 'retry' = 'reprocess',
+    includeRemoved = false,
+  ): Promise<void> {
+    try {
+      const index = await this.ensureDocIndex()
+      const policy =
+        intent === 'reprocess' ? processingPolicy(this.settings) : undefined
+      const eligible = files.filter((file) => {
+        if (this.isPathExcludedFromGraph(file.path)) return false
+        if (!includeRemoved && index.getStatus(file.path) === 'removed')
+          return false
+        if (policy?.mode === 'paragraph' && !isParagraphFile(file.extension))
+          return false
+        return (
+          intent !== 'retry' || Boolean(index.getRecord(file.path)?.pending)
+        )
+      })
+      if (!eligible.length) {
+        new Notice(
+          'No eligible documents. Excluded, removed, or unsupported documents were skipped.',
+        )
+        return
+      }
+      const backendId = this.settings.lightRagBackendIdentity
+      const policyDescription = policy
+        ? `${policy.mode === 'paragraph' ? 'Native paragraph' : 'Existing behavior'}; maximum ${policy.chunkSize} tokens; overlap ${policy.chunkOverlap}.`
+        : 'Each document keeps its originally submitted processing settings.'
+      new ConfirmModal(this.app, {
+        title:
+          intent === 'retry'
+            ? 'Retry failed processing'
+            : 'Reprocess with current settings',
+        message: `${eligible.length} document(s); ${files.length - eligible.length} skipped.\n${policyDescription}\n\nExisting graph entries may be deleted before replacement. Retrieval is unavailable for each deleted document until processing succeeds, and ingestion incurs model costs. Vault files are kept.`,
+        ctaText: intent === 'retry' ? 'Retry' : 'Reprocess',
+        destructive: true,
+        onConfirm: () => {
+          if (backendId !== this.settings.lightRagBackendIdentity) {
+            new Notice('Server connection changed. Review the operation again.')
+            return
+          }
+          void this.runGraphBatch(eligible, intent, policy, includeRemoved)
+        },
+      }).open()
+    } catch (error) {
+      new Notice(
+        `Cannot prepare reprocessing: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  private async runGraphBatch(
+    files: TFile[],
+    intent: 'new' | 'reprocess' | 'retry',
+    policy?: ProcessingPolicy,
+    includeRemoved = false,
+  ): Promise<void> {
+    if (this.graphBatchAbort) {
+      new Notice('A graph batch is already running.')
+      return
+    }
+    const paths = files.map((file) => file.path)
+    const controller = new AbortController()
+    this.graphBatchAbort = controller
+    const backendId = this.settings.lightRagBackendIdentity
+    const notice = new Notice('Preparing graph processing…', 0)
+    let completed = 0
+    let skipped = 0
+    try {
+      const capturedPolicy =
+        policy ??
+        (intent === 'retry' ? undefined : processingPolicy(this.settings))
+      await this.graphSyncTail
+      const engine = await this.getRAGEngine()
+      for (const path of paths) {
+        if (
+          controller.signal.aborted ||
+          this.graphDisposed ||
+          backendId !== this.settings.lightRagBackendIdentity
+        )
+          break
+        const file = this.app.vault.getAbstractFileByPath(path)
+        if (
+          !(file instanceof TFile) ||
+          this.isPathExcludedFromGraph(file.path) ||
+          (!includeRemoved &&
+            this.docIndexService?.getStatus(file.path) === 'removed') ||
+          (capturedPolicy?.mode === 'paragraph' &&
+            !isParagraphFile(file.extension))
+        ) {
+          skipped++
+          continue
+        }
+        notice.setMessage(
+          `Processing ${completed + skipped + 1}/${paths.length}: ${file.path}`,
+        )
+        const result = await engine.ingestFile(file, {
+          intent,
+          policy: capturedPolicy,
+          signal: controller.signal,
+        })
+        if (result.status === 'processed') completed++
+        else if (result.status === 'skipped') skipped++
+        else {
+          controller.abort()
+          new Notice(result.message ?? `Processing paused: ${file.path}`, 10000)
+          break
+        }
+      }
+      notice.setMessage(
+        `${controller.signal.aborted ? 'Batch paused' : 'Batch finished'}: ${completed} processed, ${skipped} skipped. Accepted server work may continue.`,
+      )
+      if (backendId === this.settings.lightRagBackendIdentity)
+        await this.refreshIngestedFolderPaths()
+    } catch (error) {
+      controller.abort()
+      notice.setMessage(
+        `Graph processing paused: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      if (this.graphBatchAbort === controller) this.graphBatchAbort = null
+      this.decorateFileExplorer()
+      this.timeoutIds.push(window.setTimeout(() => notice.hide(), 10000))
+      if (!controller.signal.aborted && !this.graphDisposed) {
+        const changes = [...this.deferredGraphChanges.values()]
+        this.deferredGraphChanges.clear()
+        for (const change of changes) this.queueGraphChange(change)
+      }
+    }
   }
 
   addSettingsChangeListener(
@@ -2022,32 +2425,23 @@ export default class NeuralComposerPlugin extends Plugin {
     return Promise.resolve({} as DatabaseManager)
   }
 
-  // Fix: Removed 'async' keyword as the method implementation is synchronous
-  // wrapping the result in Promises manually to satisfy the interface.
   getRAGEngine(): Promise<RAGEngine> {
-    if (this.ragEngine) return Promise.resolve(this.ragEngine)
-
-    if (!this.ragEngineInitPromise) {
-      this.ragEngineInitPromise = new Promise<RAGEngine>((resolve, reject) => {
-        try {
-          this.ragEngine = new RAGEngine(
-            this.app,
-            this.settings,
-            // FIX: Use safe double-casting instead of 'any'
-            // We cast to unknown first, then to the expected type.
-            {} as unknown as VectorManager,
-            () => {
-              this.restartLightRagServer()
-              return Promise.resolve()
-            },
-          )
-          resolve(this.ragEngine)
-        } catch (error) {
-          this.ragEngineInitPromise = null
-          reject(error instanceof Error ? error : new Error(String(error)))
-        }
-      })
-    }
+    this.ragEngineInitPromise ??= (async () => {
+      const index = await this.ensureDocIndex()
+      this.ragEngine ??= new RAGEngine(
+        this.app,
+        this.settings,
+        {} as unknown as VectorManager,
+        index,
+        () => {
+          this.restartLightRagServer()
+          return Promise.resolve()
+        },
+      )
+      await this.ragEngine.recoverPendingOperations()
+      if (this.graphDisposed) throw new Error('Plugin unloaded')
+      return this.ragEngine
+    })()
     return this.ragEngineInitPromise
   }
 
