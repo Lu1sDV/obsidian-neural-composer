@@ -29,6 +29,11 @@ import {
   isParagraphFile,
   processingPolicy,
 } from './core/rag/documentProcessing'
+import {
+  buildEntityTypeProfile,
+  entityTypeNames,
+  normalizeEntityTypeGuidance,
+} from './core/rag/entityTypeGuidance'
 import { FileExplorerDecorator } from './core/rag/fileExplorerDecorator'
 import { RAGEngine } from './core/rag/ragEngine'
 import { DatabaseManager } from './database/DatabaseManager'
@@ -59,6 +64,7 @@ export const VAR_MAX_ASYNC = 'MAX_ASYNC' // Nombre de variable de entorno/config
 
 const MANAGED_ENV_BEGIN = '# BEGIN NEURAL COMPOSER MANAGED ENV'
 const MANAGED_ENV_END = '# END NEURAL COMPOSER MANAGED ENV'
+const ENTITY_TYPE_PROFILE_NAME = 'neural-composer.yml'
 // Complete native SDK endpoints; generated defaults bypass OpenAI /v1 normalization.
 const NATIVE_PROVIDER_DEFAULT_HOSTS: Record<string, string> = {
   openai: 'https://api.openai.com/v1',
@@ -1459,16 +1465,15 @@ export default class NeuralComposerPlugin extends Plugin {
         envContent += `OPENAI_API_KEY=no-api-key\n`
       }
 
-      // Entity Types
+      // Entity type descriptions are consumed by LightRAG v1.5+ through a
+      // managed YAML profile. ENTITY_TYPES keeps older backends compatible.
       if (this.settings.useCustomEntityTypes) {
-        const rawTypes = this.settings.lightRagEntityTypes
-        if (rawTypes && rawTypes.trim().length > 0) {
-          const typeList = rawTypes
-            .split(',')
-            .map((t) => t.trim())
-            .filter((t) => t.length > 0)
-          envContent += `\nENTITY_TYPES='${JSON.stringify(typeList)}'\n`
-        }
+        const typeNames = entityTypeNames(
+          this.settings.lightRagEntityTypeGuidance,
+        )
+        envContent += `\nPROMPT_DIR=prompts\n`
+        envContent += `ENTITY_TYPE_PROMPT_FILE=${ENTITY_TYPE_PROFILE_NAME}\n`
+        envContent += `ENTITY_TYPES='${JSON.stringify(typeNames)}'\n`
       }
 
       // Custom Overrides
@@ -1564,6 +1569,7 @@ export default class NeuralComposerPlugin extends Plugin {
         new Notice('Server configuration changed; reopen it before saving.')
         return false
       }
+      this.writeEntityTypeProfile()
       this.writeEnvFileVerified(
         snapshot.envPath,
         snapshot.originalContent,
@@ -1693,6 +1699,31 @@ export default class NeuralComposerPlugin extends Plugin {
     if (previousExists) this._nodeFs.unlinkSync(backupPath)
   }
 
+  private writeEntityTypeProfile(): void {
+    if (!this.settings.useCustomEntityTypes) return
+    if (!this._nodeFs || !this._nodePath)
+      throw new Error('Local server configuration is unavailable.')
+    const workDir = this.settings.lightRagWorkDir
+    if (!workDir) throw new Error('Configure a local server directory first.')
+
+    const profileDir = this._nodePath.join(workDir, 'prompts', 'entity_type')
+    const profilePath = this._nodePath.join(
+      profileDir,
+      ENTITY_TYPE_PROFILE_NAME,
+    )
+    const previousExists = this._nodeFs.existsSync(profilePath)
+    const previous = previousExists
+      ? this._nodeFs.readFileSync(profilePath, 'utf8')
+      : ''
+    const guidance = normalizeEntityTypeGuidance(
+      this.settings.lightRagEntityTypeGuidance,
+    )
+    const content = buildEntityTypeProfile(guidance)
+
+    this._nodeFs.mkdirSync(profileDir, { recursive: true })
+    this.writeEnvFileVerified(profilePath, previous, content, previousExists)
+  }
+
   public updateEnvFile(): boolean {
     try {
       const snapshot = this.prepareEnvEditorSnapshot()
@@ -1700,6 +1731,7 @@ export default class NeuralComposerPlugin extends Plugin {
         throw new Error(
           'Server connection changed; configuration was not replaced.',
         )
+      this.writeEntityTypeProfile()
       this.writeEnvFileVerified(
         snapshot.envPath,
         snapshot.originalContent,
@@ -2535,18 +2567,19 @@ export default class NeuralComposerPlugin extends Plugin {
       const prompt = `
         ACT AS: Senior Data Ontologist & Knowledge Graph Architect.
         TASK: Analyze the provided user's "${sourcePath}" folder to extract the fundamental ontology.
-        GOAL: Define a concise list of high-level "Entity Types" that cover the majority of the concepts in the text without being overly granular.
-        
-        GUIDELINES FOR ENTITY TYPES:
-        - **Abstraction:** Prefer broad categories (e.g., use "Organization" instead of "Company", "Startup", "NGO").
-        - **Relevance:** Include types for abstract concepts (e.g., "Concept", "Methodology", "Goal") as LightRAG relies on conceptual connections.
-        - **Coverage:** The list should allow classifying at least 90% of the key nouns in the text.
-        
+        GOAL: Define a concise set of high-level entity types that covers the majority of the concepts without becoming overly granular.
+
+        GUIDELINES:
+        - Prefer broad categories (for example, Organization instead of Company, Startup, and NGO).
+        - Include abstract concepts when relevant because LightRAG relies on conceptual connections.
+        - Each description must clearly state what belongs in that type so the extraction model can distinguish overlapping categories.
+        - Cover at least 90% of the key nouns with the top 8-15 types.
+
         RULES:
-        1. Output ONLY a comma-separated list of types. NO preamble, NO markdown, NO explanations.
-        2. Types must be singular and PascalCase (e.g., ResearchPaper, SoftwareTool).
-        3. Limit the list to the top 8-15 most relevant types.
-        4. CRITICAL: The output types MUST be in ${targetLang}.
+        1. Output one entity type per line as: PascalCaseName: concise description
+        2. Output only those lines. Do not use markdown, bullets, a preamble, or a conclusion.
+        3. Type names must be singular PascalCase (for example, ResearchPaper or SoftwareTool).
+        4. Type names and descriptions must be written in ${targetLang}.
 
         SAMPLE CONTENT:
         ${sampleText}
@@ -2557,19 +2590,21 @@ export default class NeuralComposerPlugin extends Plugin {
       const generatedTypes = await this.simpleLLMCall(prompt)
 
       if (generatedTypes) {
-        const cleanTypes = generatedTypes
-          .replace(/Here are...|Output:|\[|\]/gi, '')
+        const withoutFence = generatedTypes
           .trim()
+          .replace(/^```(?:text)?\s*/i, '')
+          .replace(/\s*```$/, '')
+        const guidance = normalizeEntityTypeGuidance(withoutFence)
 
         await this.setSettings({
           ...this.settings,
-          lightRagEntityTypes: cleanTypes,
+          lightRagEntityTypeGuidance: guidance,
         })
 
-        new Notice('Ontology generated!')
+        new Notice('Entity type guidance generated and saved.')
         this.updateEnvFile()
 
-        return cleanTypes
+        return guidance
       }
     } catch (e) {
       console.error(e)

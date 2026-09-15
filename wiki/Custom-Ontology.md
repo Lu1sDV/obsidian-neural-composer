@@ -15,100 +15,44 @@ Defining the right entity types produces a graph that is:
 
 ---
 
-## LightRAG v1.4.x — inline entity types
-
-> If you are on LightRAG v1.5+, skip to the next section.
+## Configure custom guidance
 
 1. Open **Settings → Neural Composer → Graph & Vault → Ontology**.
 2. Toggle **Use custom entity types** on.
-3. Edit the comma-separated list in the textarea.
+3. Enter one type per line as `PascalCaseName: description`.
+4. Leave the field to validate and save the changes.
+5. Click **Restart server now**, then reprocess affected documents.
 
-[screenshot: Ontology section with toggle enabled and a textarea containing "Person, Dataset, Experiment, Benchmark, Method, Paper, Institution"]
+Example:
 
-**Format:** comma-separated type names, singular, title-case. Example:
-
+```text
+Person: Human individuals, real or fictional
+Organization: Companies, institutions, government bodies, or groups
+Dataset: A structured collection of observations used for analysis
+Experiment: A controlled study with a defined setup and outcome
+Method: A procedure, technique, algorithm, or workflow
+Vulnerability: A weakness or condition that can cause harm or be exploited
 ```
-Person, Organization, Dataset, Experiment, Method, Benchmark, Paper, Venue, Metric
-```
 
-LightRAG will prioritize extracting entities of these types. Types you omit will still be extracted occasionally if LightRAG finds a clear match, but the focus shifts to your list.
+The name becomes the entity type stored in the graph. The description is sent to the extraction model and should define what belongs in the category. An invalid line or duplicate name is shown below the editor and is not saved.
+
+For a managed local server, Neural Composer creates `prompts/entity_type/neural-composer.yml` under the graph data directory and configures `PROMPT_DIR` and `ENTITY_TYPE_PROMPT_FILE` automatically. It also emits the legacy `ENTITY_TYPES` list for older LightRAG servers. The generated YAML file is plugin-owned and will be replaced when the guidance changes.
+
+Remote LightRAG instances cannot be configured through the local filesystem. Configure an equivalent YAML entity-type profile on the remote server host.
 
 ### Tips for choosing entity types
 
-- **Keep it to 8–15 types.** Too many reduces extraction precision.
-- **Use singular forms.** `Person` not `People`.
-- **Be specific enough to be useful, but not so narrow that nothing matches.** `ResearchPaper` is better than `ArxivPaper2024`.
-- **Test with a small folder first** before re-ingesting your entire vault.
+- **Keep it to 8–15 types.** Too many similar choices reduce classification consistency.
+- **Use singular PascalCase names.** Use `ResearchPaper`, not `research papers`.
+- **Describe the boundary.** Explain what belongs in a type instead of merely restating its name.
+- **Avoid unnecessary overlap.** Keep both `Theory` and `Concept` only when that distinction helps retrieval or graph browsing.
+- **Test with a small folder first** before reprocessing the entire vault.
 
-### Domain examples
+### Generate from representative notes
 
-| Domain | Suggested entity types |
-| :--- | :--- |
-| Academic research | `Person, Institution, Paper, Dataset, Method, Benchmark, Metric, Concept, Venue` |
-| Fiction writing | `Character, Location, Organization, Event, Artifact, Concept, PlotArc` |
-| Software engineering | `System, Component, API, Concept, Person, Organization, Technology, Issue` |
-| Game mastering (TTRPG) | `Character, Faction, Location, Artifact, Event, Creature, Lore, Session` |
-| Personal knowledge | `Person, Concept, Project, Resource, Idea, Decision, Event` |
+The optional **Source folder for generation** is used only when you click **Generate from folder**. Neural Composer samples up to five supported files from that vault folder and asks the configured chat model to propose 8–15 described entity types.
 
----
-
-## LightRAG v1.5+ — jinja2 template file
-
-LightRAG v1.5.0 replaced the `ENTITY_TYPES` environment variable with a file-based approach. Instead of a comma-separated list, you provide a **jinja2 template** that LightRAG uses when prompting the LLM during extraction.
-
-When Neural Composer detects a v1.5+ server, the Ontology textarea is replaced with a **file path** field, and a migration banner appears in settings.
-
-[screenshot: migration banner in Graph & Vault settings reading "⚡ LightRAG v1.5 detected — entity types now require a template file", with the new file path input below]
-
-### Step 1 — Create the template file
-
-Create a file called `entity_types.jinja2` (or any name you prefer) in your **Data Directory** — the same folder LightRAG uses to store the graph. The simplest template looks like this:
-
-```jinja2
-Your goal is to extract structured information from the following text.
-Extract only entities of these types: {{ entity_types }}.
-
-Focus on:
-- Relationships between entities
-- Properties and attributes of each entity
-- Temporal or causal relationships where present
-
-Text:
-{{ input_text }}
-```
-
-LightRAG injects `entity_types` and `input_text` at runtime.
-
-### Step 2 — Define your entity types in the template
-
-To hardcode your custom types, replace `{{ entity_types }}` with your list directly:
-
-```jinja2
-Your goal is to extract structured information from the following text.
-Extract only entities of these types:
-Person, Dataset, Experiment, Method, Benchmark, Paper, Institution, Metric, Venue.
-
-Focus on relationships, attributes, and temporal connections between these entities.
-
-Text:
-{{ input_text }}
-```
-
-### Step 3 — Point Neural Composer at the file
-
-In **Settings → Graph & Vault → Ontology**, enter the full absolute path to the template file:
-
-```
-/Users/you/lightrag-data/entity_types.jinja2
-```
-
-[screenshot: Ontology section on v1.5+ — file path field with a path entered and a small "Verify file" button]
-
-Click **Restart Server** to apply the change.
-
-### Step 4 — Re-ingest your notes
-
-Entity types only affect ingestion, not querying. After changing your template, you need to re-ingest notes for the new types to take effect. Right-click the watched folder → **Add to graph** to queue everything.
+Review the generated lines before restarting LightRAG. The source folder is not automatically ingested and LightRAG does not read it at startup.
 
 ---
 
@@ -117,7 +61,7 @@ Entity types only affect ingestion, not querying. After changing your template, 
 **You don't need to delete the graph to change entity types.** New and re-ingested notes will use the new types. Existing nodes in the graph retain their original types until those notes are re-ingested.
 
 If you want the entire graph to use the new types:
-1. Change the entity types / template.
+1. Change the entity type guidance.
 2. Delete the LightRAG data directory contents (or use a fresh directory).
 3. Re-ingest all notes.
 
@@ -125,10 +69,8 @@ This is a destructive operation — the graph is rebuilt from scratch — but it
 
 ---
 
-## Ontology folder (optional)
+## Source folder for generation (optional)
 
-The **Ontology folder** field (Settings → Graph & Vault → Ontology) lets you point LightRAG at a folder of additional context documents that inform entity extraction. For example, a folder of domain glossaries or reference documents.
+Set **Source folder for generation** to a vault folder containing representative notes, glossaries, or reference material. Neural Composer samples up to five supported files from it only when you click **Generate from folder**.
 
-LightRAG reads these files once at startup and uses them to improve entity disambiguation. This field is optional and separate from the template file.
-
-[screenshot: Ontology section showing both the entity types file path field and the Ontology folder field below it]
+This setting does not ingest the folder, and LightRAG does not read it directly.

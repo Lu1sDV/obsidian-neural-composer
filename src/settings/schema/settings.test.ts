@@ -97,7 +97,7 @@ describe('parseNeuralComposerSettings', () => {
       lightRagChunkOverlap: 80,
     })
     expect(DEFAULT_SETTINGS).toMatchObject({
-      version: 16,
+      version: 17,
       lightRagChunkingStrategy: 'legacy',
       lightRagChunkSize: 1200,
       lightRagChunkOverlap: 100,
@@ -105,9 +105,12 @@ describe('parseNeuralComposerSettings', () => {
       lightRagBackendIdentity: '',
       lightRagImageDownloadsDisabledFor: '',
     })
+    expect(DEFAULT_SETTINGS.lightRagEntityTypeGuidance).toContain(
+      'Person: Human individuals, real or fictional',
+    )
 
     expect(settings).toMatchObject({
-      version: 16,
+      version: 17,
       lightRagChunkingStrategy: 'legacy',
       lightRagChunkSize: 1600,
       lightRagChunkOverlap: 80,
@@ -115,6 +118,9 @@ describe('parseNeuralComposerSettings', () => {
       lightRagBackendIdentity: '',
       lightRagImageDownloadsDisabledFor: '',
     })
+    expect(settings.lightRagEntityTypeGuidance).toContain(
+      'Person: Human individuals, real or fictional',
+    )
   })
 
   it('retains numeric values that need explicit correction instead of replacing them', () => {
@@ -126,5 +132,21 @@ describe('parseNeuralComposerSettings', () => {
 
     expect(settings.lightRagChunkSize).toBe(0.5)
     expect(settings.lightRagChunkOverlap).toBe(1)
+  })
+
+  it('migrates legacy custom entity names into editable descriptions', () => {
+    const settings = parseNeuralComposerSettings({
+      version: 16,
+      lightRagEntityTypes: 'Person, Vulnerability',
+      useCustomEntityTypes: true,
+    })
+
+    expect(settings).not.toHaveProperty('lightRagEntityTypes')
+    expect(settings.lightRagEntityTypeGuidance).toBe(
+      [
+        'Person: Human individuals, real or fictional',
+        'Vulnerability: A weakness, exposure, defect, or condition that can cause harm or be exploited',
+      ].join('\n'),
+    )
   })
 })

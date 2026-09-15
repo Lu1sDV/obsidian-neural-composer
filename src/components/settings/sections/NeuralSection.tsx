@@ -8,6 +8,7 @@ import {
 } from 'obsidian'
 import { useEffect, useRef, useState } from 'react'
 
+import { normalizeEntityTypeGuidance } from '../../../core/rag/entityTypeGuidance'
 import NeuralComposerPlugin from '../../../main'
 
 import { renderDocumentProcessingSettings } from './DocumentProcessingSettings'
@@ -433,7 +434,7 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
       new Setting(container)
         .setName('Use custom entity types')
         .setDesc(
-          `Enable to define your own knowledge categories. Disable to use ${BACKEND_NAME} defaults.`,
+          `Describe the knowledge categories ${BACKEND_NAME} should use during entity extraction. Disable to use its built-in guidance.`,
         )
         .addToggle((toggle) =>
           toggle.setValue(useCustomOntology).onChange((value) => {
@@ -453,28 +454,15 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
         const warningDiv = container.createDiv({
           cls: 'nrlcmp-setting-warning',
         })
-
-        // FIX: Sentence case
-        warningDiv.createEl('strong', { text: 'Critical warning:' })
-        warningDiv.createEl('br')
-        // FIX: Sentence case (Entity Types -> entity types)
+        warningDiv.createEl('strong', { text: 'Reprocessing required.' })
         warningDiv.createSpan({
-          text: 'Changing entity types fundamentally alters how the graph is built.',
+          text: ' Restart LightRAG after changing this guidance, then reprocess affected documents. Existing entities keep their previous types until reprocessed.',
         })
-        warningDiv.createEl('br')
-        // FIX: Sentence case (Graph Data folder -> graph data folder)
-        warningDiv.createSpan({
-          text: 'If you already have data ingested, you ',
-        })
-        warningDiv.createEl('strong', {
-          text: 'Must delete your graph data folder',
-        })
-        warningDiv.createSpan({ text: ' and re-ingest all documents.' })
 
         new Setting(container)
-          .setName('Ontology source folder')
+          .setName('Source folder for generation')
           .setDesc(
-            'Vault-relative folder with representative notes to analyze (e.g. Main/Memories).',
+            'Optional vault folder sampled only when you click “generate from folder.” LightRAG does not ingest this folder automatically.',
           )
           .addText((text) => {
             text
@@ -490,26 +478,27 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
           })
 
         let typesTextArea: HTMLTextAreaElement
+        let guidanceStatus: HTMLDivElement
+        let validateEntityTypeEditor: (saved?: boolean) => boolean = () => false
 
         new Setting(container)
-          .setName('Entity types definition')
-          .setDesc('Define the "categories" of your field of knowledge.')
+          .setName('Entity type guidance')
+          .setDesc(
+            'Enter one type per line as a singular name without spaces, followed by a colon and a description. The description tells LightRAG what belongs in that category.',
+          )
           .addButton((button) =>
             button
-              .setButtonText('Analyze & generate')
+              .setButtonText('Generate from folder')
               .setCta()
               .onClick(() => {
                 void (async () => {
-                  const newTypes = await plugin.generateEntityTypes()
-                  if (newTypes && typesTextArea) {
-                    typesTextArea.value = newTypes
-                    // Save directly — button click doesn't blur the textarea
-                    await plugin.setSettings({
-                      ...plugin.settings,
-                      lightRagEntityTypes: newTypes,
-                    })
-                    plugin.updateEnvFile()
-                  }
+                  const guidance = await plugin.generateEntityTypes()
+                  if (!guidance) return
+                  typesTextArea.value = guidance
+                  validateEntityTypeEditor(true)
+                  guidanceStatus.setText(
+                    'Generated and saved. Restart LightRAG, then reprocess affected documents.',
+                  )
                 })()
               }),
           )
@@ -519,18 +508,64 @@ export const NeuralSection = ({ plugin }: { plugin: NeuralComposerPlugin }) => {
         })
         typesTextArea = textAreaContainer.createEl('textarea', {
           cls: 'nrlcmp-setting-textarea',
+          attr: {
+            'aria-label': 'Entity type guidance',
+            placeholder: 'Person: human individuals, real or fictional',
+            spellcheck: 'false',
+          },
         })
-        typesTextArea.value = plugin.settings.lightRagEntityTypes
-        typesTextArea.addEventListener('blur', (e) => {
-          const target = e.target as HTMLTextAreaElement
+        typesTextArea.rows = 12
+        typesTextArea.value = plugin.settings.lightRagEntityTypeGuidance
+        guidanceStatus = textAreaContainer.createDiv({
+          cls: 'nrlcmp-entity-guidance-status',
+          attr: { 'aria-live': 'polite' },
+        })
+
+        validateEntityTypeEditor = (saved = false) => {
+          try {
+            const normalized = normalizeEntityTypeGuidance(typesTextArea.value)
+            const count = normalized.split('\n').length
+            typesTextArea.setCustomValidity('')
+            guidanceStatus.removeClass('is-invalid')
+            guidanceStatus.setText(
+              saved
+                ? `${count} ${count === 1 ? 'type' : 'types'} saved. Restart LightRAG after changing this guidance.`
+                : `${count} ${count === 1 ? 'type' : 'types'} ready. Changes save when you leave this field.`,
+            )
+            return true
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : 'Invalid entity guidance'
+            typesTextArea.setCustomValidity(message)
+            guidanceStatus.addClass('is-invalid')
+            guidanceStatus.setText(message)
+            return false
+          }
+        }
+
+        typesTextArea.addEventListener('input', () =>
+          validateEntityTypeEditor(),
+        )
+        typesTextArea.addEventListener('blur', () => {
+          if (!validateEntityTypeEditor()) {
+            typesTextArea.reportValidity()
+            return
+          }
           void (async () => {
+            const guidance = normalizeEntityTypeGuidance(typesTextArea.value)
+            typesTextArea.value = guidance
             await plugin.setSettings({
               ...plugin.settings,
-              lightRagEntityTypes: target.value,
+              lightRagEntityTypeGuidance: guidance,
             })
-            plugin.updateEnvFile()
+            guidanceStatus.setText(
+              plugin.updateEnvFile()
+                ? 'Saved. Restart LightRAG, then reprocess affected documents.'
+                : 'Saved in Obsidian, but the local LightRAG profile could not be updated.',
+            )
           })()
         })
+        validateEntityTypeEditor(true)
       }
 
       // --- RERANKING SECTION ---
