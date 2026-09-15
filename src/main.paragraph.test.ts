@@ -214,6 +214,93 @@ function createPlugin() {
   return { plugin, settings, saveData }
 }
 
+it('writes described entity guidance for current and legacy LightRAG extraction', () => {
+  const { plugin, settings } = createPlugin()
+  const { files, fs } = createMemoryFs('')
+  Object.assign(plugin, {
+    settings: {
+      ...settings,
+      lightRagEntityTypeGuidance: [
+        'Person: Human individuals',
+        'Vulnerability: A weakness that can be exploited',
+      ].join('\n'),
+      lightRagUseRemote: false,
+      lightRagWorkDir: '/synthetic',
+      useCustomEntityTypes: true,
+    },
+    _nodeFs: fs,
+    _nodePath: { join: (...parts: string[]) => parts.join('/') },
+  })
+
+  expect(plugin.updateEnvFile()).toBe(true)
+  const env = files.get('/synthetic/.env') ?? ''
+  expect(lastEnvValue(env, 'PROMPT_DIR')).toBe('prompts')
+  expect(lastEnvValue(env, 'ENTITY_TYPE_PROMPT_FILE')).toBe(
+    'neural-composer.yml',
+  )
+  expect(lastEnvValue(env, 'ENTITY_TYPES')).toBe(`'["Person","Vulnerability"]'`)
+  expect(
+    files.get('/synthetic/prompts/entity_type/neural-composer.yml'),
+  ).toContain('  - Vulnerability: A weakness that can be exploited')
+})
+
+it('generates and persists described entity guidance', async () => {
+  const { plugin, settings } = createPlugin()
+  const file = Object.assign(new TFile(), {
+    basename: 'Example',
+    extension: 'md',
+    name: 'Example.md',
+    path: 'Ontology/Example.md',
+  })
+  const folder = Object.assign(new TFolder(), {
+    children: [file],
+    name: 'Ontology',
+    path: 'Ontology',
+  })
+  const setSettings = jest.fn(async (next: NeuralComposerSettings) => {
+    plugin.settings = next
+  })
+  const updateEnvFile = jest.fn(() => true)
+  const simpleLLMCall = jest.fn(async () =>
+    [
+      '```text',
+      'Person: Human individuals mentioned in the notes',
+      'Vulnerability: Weaknesses that can cause harm',
+      '```',
+    ].join('\n'),
+  )
+  Object.assign(plugin, {
+    app: {
+      vault: {
+        getAbstractFileByPath: () => folder,
+        read: async () => 'Alice documented an exploitable weakness.',
+      },
+    },
+    settings: {
+      ...settings,
+      lightRagOntologyFolder: 'Ontology',
+    },
+    setSettings,
+    simpleLLMCall,
+    updateEnvFile,
+  })
+
+  await expect(plugin.generateEntityTypes()).resolves.toBe(
+    [
+      'Person: Human individuals mentioned in the notes',
+      'Vulnerability: Weaknesses that can cause harm',
+    ].join('\n'),
+  )
+  expect(simpleLLMCall).toHaveBeenCalledWith(
+    expect.stringContaining('Output one entity type per line'),
+  )
+  expect(setSettings).toHaveBeenCalledTimes(1)
+  expect(setSettings.mock.calls[0][0].lightRagEntityTypeGuidance).toContain(
+    'Vulnerability: Weaknesses that can cause harm',
+  )
+  expect(updateEnvFile).toHaveBeenCalledTimes(1)
+})
+
 function overrideProcessPlatform(platform: NodeJS.Platform): () => void {
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
   if (!descriptor) throw new Error('process.platform descriptor is unavailable')

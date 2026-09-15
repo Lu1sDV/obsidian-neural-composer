@@ -149,13 +149,19 @@ Reranking runs a second-pass scoring model over retrieved chunks to improve resu
 
 ### Ontology (entity types)
 
-Lets you teach the graph your domain's vocabulary so LightRAG extracts the right kinds of entities from your notes.
+Lets you teach the graph your domain vocabulary so LightRAG extracts and classifies the right entities from your notes.
 
-[screenshot: Ontology section — showing the toggle "Use custom entity types" and the textarea below it with example types]
+Toggle **Use custom entity types**, then enter one type per line as `PascalCaseName: description`. For example:
 
-Toggle **Use custom entity types** to enable. Then enter a comma-separated list of entity type names in the textarea (e.g., `Person, Experiment, Theorem, Location`). LightRAG will prioritize these types when building the graph.
+```text
+Person: Human individuals, real or fictional
+Experiment: A controlled study with a defined setup and outcome
+Vulnerability: A weakness or condition that can cause harm or be exploited
+```
 
-> **LightRAG v1.5+ note:** Version 1.5 replaced the inline entity types list with a jinja2 template file. When Neural Composer detects a v1.5+ server, the textarea is replaced with a **file path** field — point it at a `.jinja2` template file in your data directory. A migration banner will appear in settings explaining the change.
+The description is part of the extraction guidance; it tells the model how to distinguish categories that overlap. Invalid or duplicate names are shown below the editor and are not saved. Valid changes save when you leave the field.
+
+For a managed local server, Neural Composer writes the LightRAG YAML profile and `.env` references automatically. Restart LightRAG, then reprocess affected documents. Existing entities keep their previous types until reprocessed. Remote LightRAG instances must configure their entity-type YAML profile on the server host.
 
 ---
 

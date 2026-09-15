@@ -144,16 +144,17 @@ The file explorer re-renders status dots on every status update. With very large
 
 ---
 
-## LightRAG v1.5 compatibility — entity types not working
+## Custom entity guidance is not taking effect
 
-LightRAG v1.5.0 removed the `ENTITY_TYPES` environment variable. If you upgraded LightRAG and your custom entity types stopped working:
+Check the following:
 
-1. Neural Composer v1.4+ detects the server version automatically. A migration banner will appear in **Settings → Graph & Vault** if v1.5+ is detected.
-2. The **Ontology** section in settings will switch from a textarea to a **file path** field.
-3. Create a jinja2 template file (e.g., `entity_types.jinja2`) in your data directory — see the [Custom Ontology](Custom-Ontology) page for the template format.
-4. Enter the full path to that file in the new field and click **Restart Server**.
+1. Each editor line uses `PascalCaseName: description` and no validation error appears below the field.
+2. Leave the editor so the status changes from editing to saved.
+3. Restart LightRAG after saving.
+4. Reprocess affected documents. Existing graph entities retain their old types until reprocessed.
+5. For a managed local server, confirm the graph data directory contains `prompts/entity_type/neural-composer.yml`.
 
-[screenshot: migration banner in Graph & Vault settings reading "⚡ LightRAG v1.5 detected" with the new file path field visible]
+Neural Composer configures the YAML profile automatically for managed local servers. For a remote LightRAG instance, create and configure the equivalent entity-type YAML profile on the server host.
 
 ---
 

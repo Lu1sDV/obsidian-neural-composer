@@ -7,6 +7,7 @@ import {
   DEFAULT_EMBEDDING_MODELS,
   DEFAULT_PROVIDERS,
 } from '../../constants'
+import { DEFAULT_ENTITY_TYPE_GUIDANCE } from '../../core/rag/entityTypeGuidance'
 import { chatModelSchema } from '../../types/chat-model.types'
 import { embeddingModelSchema } from '../../types/embedding-model.types'
 import { mcpServerConfigSchema } from '../../types/mcp.types'
@@ -110,7 +111,7 @@ export const NeuralComposerSettingsSchema = z.object({
   lightRagRerankBindingType: z.string().catch(''),
 
   // --- ONTOLOGY (NUEVO) ---
-  lightRagEntityTypes: z.string().catch(''),
+  lightRagEntityTypeGuidance: z.string().catch(DEFAULT_ENTITY_TYPE_GUIDANCE),
   lightRagOntologyFolder: z.string().catch(''),
   // NUEVO INTERRUPTOR:
   useCustomEntityTypes: z.boolean().catch(false),
@@ -202,9 +203,7 @@ export const DEFAULT_SETTINGS: NeuralComposerSettings = {
   lightRagRerankBindingType: '',
 
   // --- ONTOLOGY DEFAULTS ---
-  // Ponemos los defaults estándar de LightRAG para que el usuario tenga un punto de partida
-  lightRagEntityTypes:
-    'Person, Creature, Organization, Location, Event, Concept, Method, Content, Data, Artifact, NaturalObject',
+  lightRagEntityTypeGuidance: DEFAULT_ENTITY_TYPE_GUIDANCE,
   lightRagOntologyFolder: '',
   // NUEVO DEFAULT:
   useCustomEntityTypes: false,
