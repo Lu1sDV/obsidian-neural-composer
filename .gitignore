@@ -31,6 +31,8 @@ data.json
 .neural_memory/
 graph_data/
 .claude/
+.omp/
+.omc/
 
 # Python bytecode cache (scripts/)
 __pycache__/
